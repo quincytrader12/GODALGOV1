@@ -9,6 +9,16 @@ dependencies = [
   # ccxt.async_support and ccxt.pro (WebSocket streaming) ship in the base
   # package as of v4 -- no extras required.
   "ccxt==4.5.76",
+
+  # Numerics. pandas for bar/series handling, scipy for distributions used by
+  # the deflated Sharpe ratio, statsmodels for ADF and OLS in the OU fits.
+  "numpy>=1.26,<3",
+  "pandas>=2.2,<3",
+  "scipy>=1.13",
+  "statsmodels>=0.14",
+
+  # Parquet backend for the OHLCV disk cache in godalgo.data.feed.
+  "pyarrow>=15",
 ]
 
 [dependency-groups]
@@ -17,10 +27,22 @@ dev = [
   "ruff>=0.9",
 ]
 
-[tool.uv]
-# No importable package in-tree yet; architecture still being decided.
-package = false
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/godalgo"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# RUF046 flags int(round(x)) as redundant. It is not, for us: numpy scalars
+# round differently across the numpy versions this project supports (1.x
+# returned np.float64 from round(), 2.x returns int), and a float where an int
+# is expected fails deep inside pandas as a skipped candidate rather than an
+# error. The explicit cast is deliberate version insurance -- see
+# ParamSpec.clip and tests/test_params.py.
+ignore = ["RUF046"]

@@ -1,6 +1,105 @@
 # GODALGOV1
 
-Algorithmic crypto trading bot. **Work in progress — architecture is still being decided.**
+Regime-aware algorithmic crypto trading bot running two quant strategies —
+**time-series momentum** and **Ornstein-Uhlenbeck mean reversion** — with a
+self-improvement loop gated on out-of-sample statistical evidence.
+
+The design rests on one claim: momentum and mean reversion are *opposite bets on
+the sign of serial correlation*, so running them side by side at fixed weights is
+close to self-cancelling. Allocation is therefore conditional — a regime
+classifier estimates which autocorrelation sign currently holds, and capital
+follows that estimate.
+
+See **[docs/THEORY.md](docs/THEORY.md)** for the research grounding behind every
+design decision.
+
+## How it fits together
+
+```
+ccxt OHLCV ──> indicators ──> ┌─ momentum (TSMOM, vol-scaled, multi-horizon)
+                              └─ mean reversion (OU z-score, half-life gated)
+                                      │
+              regime classifier ──────┤   Hurst · variance ratio · ADF + half-life
+              (which bet is live?)    │
+                                      v
+                         regime-weighted blend
+                                      v
+                    vol targeting + no-trade band
+                                      v
+              RISK LIMITS  (deterministic, outside the loop)
+                                      v
+                                   orders
+```
+
+The self-improvement loop wraps this: propose parameters → purged walk-forward →
+promotion gate (deflated Sharpe + PBO) → append-only ledger.
+
+## Usage
+
+```bash
+uv sync
+python -m godalgo backtest --symbol BTC/USDT --timeframe 1h --limit 8000
+python -m godalgo evolve   --symbol BTC/USDT --candidates 16
+python -m godalgo ledger
+pytest                     # 69 tests
+```
+
+## Self-improvement, and why it is gated
+
+A system that re-tunes itself on its own backtests is mathematically an
+overfitting machine: evaluate N configurations, keep the best, and the maximum
+Sharpe you observe is an *order statistic* whose expectation is well above zero
+even when every configuration is worthless.
+
+Measured on this repo's own synthetic data — widening the search from 8 trials
+to 80:
+
+| | 8 trials | 80 trials |
+|---|---|---|
+| OOS Sharpe | 1.88 | **2.24** |
+| Deflated Sharpe | 0.887 | **0.534** |
+
+The raw number improved; the evidence got worse. Naive selection would call that
+an upgrade. The gate rejects it.
+
+Promotion requires **all** of: OOS Sharpe floor, deflated Sharpe ≥ 0.95
+(corrects for N trials), PBO ≤ 0.35 (does the *selection procedure* generalise?),
+a drawdown ceiling, parameter stability across folds, and a minimum improvement
+over the incumbent. Every decision — pass or fail — is appended to a JSONL ledger.
+
+### What the loop may and may not do
+
+| Permitted | Forbidden |
+|---|---|
+| Propose parameters inside declared `ParamSpec` bounds | Generate or modify code |
+| Search, and be penalised for searching | Adjust its own acceptance thresholds |
+| Promote on out-of-sample evidence | Touch `RiskLimits` |
+
+`RiskLimits` appears in no strategy's search space. **A system that can relax its
+own stop-loss does not have a stop-loss.**
+
+## Layout
+
+| Path | Role |
+|---|---|
+| `core/types.py` | Signals, regimes, targets, fills |
+| `data/feed.py` | ccxt OHLCV: pagination, caching, partial-bar handling |
+| `features/` | Indicators; regime classification (Hurst, VR, ADF, half-life) |
+| `strategies/` | Momentum and mean reversion, over a bounded parameter space |
+| `portfolio/` | Regime allocator; vol targeting, fractional Kelly, no-trade band |
+| `risk/limits.py` | Deterministic caps and kill switch — **not tunable** |
+| `backtest/` | Engine with costs; metrics incl. deflated Sharpe and PBO |
+| `evolve/` | Purged walk-forward, parameter search, promotion gate + ledger |
+
+## Status
+
+Backtest and evolution paths are implemented and tested (69 tests). **No live
+order execution yet** — there is no exchange authentication, no order router, and
+no position reconciliation. The data feed is read-only and accepts no API keys.
+
+The feed's network path is unverified: this development sandbox blocks exchange
+APIs, so pagination and retry logic have been reviewed but not exercised against
+a live venue. Its frame-normalisation logic is covered by tests.
 
 ## Setup
 

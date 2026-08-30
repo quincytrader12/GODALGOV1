@@ -19,8 +19,10 @@ build/
 credentials.json
 
 # Data & logs
-data/
-logs/
+# Anchored to the repo root: an unanchored "data/" also matches the
+# src/godalgo/data package and silently drops it from commits.
+/data/
+/logs/
 *.log
 *.db
 *.sqlite3
