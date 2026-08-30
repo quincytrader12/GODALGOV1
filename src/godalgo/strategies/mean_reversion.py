@@ -118,6 +118,17 @@ class MeanReversionStrategy(Strategy):
         self.params: MeanReversionParams
 
     @property
+    def expected_holding_bars(self) -> float:
+        """The fitted half-life, which is literally this quantity.
+
+        An OU half-life is the expected time for the deviation to close half the
+        gap to its mean -- exactly the horizon over which a reversion trade is
+        expected to pay. The midpoint of the tradeable band is used, since the
+        realised half-life varies between refits.
+        """
+        return max(1.0, 0.5 * (self.params.min_half_life + self.params.max_half_life))
+
+    @property
     def warmup(self) -> int:
         return int(max(self.params.lookback, self.params.half_life_window))
 

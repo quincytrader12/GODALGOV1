@@ -90,12 +90,16 @@ class LiveEngineConfig:
     reconcile_every: float = 60.0
     """Seconds between position reconciliations."""
 
-    edge_horizon_bars: float = 3.0
+    edge_horizon_bars: float | None = None
     """Bars the expected-edge estimate is projected over.
 
-    The strategy's conviction is converted to an expected move by scaling
-    trailing volatility over this horizon. Inflating it inflates expected edge
-    and defeats the router's cost gate, so it is kept deliberately short.
+    ``None`` -- the default -- derives it from the strategies' own
+    ``expected_holding_bars``, blend-weighted by which one is driving. A
+    hardcoded horizon shorter than the true holding period understates edge by
+    its square root and refuses trades that would clear their costs.
+
+    Inflating it has the opposite failure -- it defeats the cost gate -- so this
+    is derived rather than tuned.
     """
 
     allocation: AllocationConfig = field(default_factory=AllocationConfig)
@@ -296,6 +300,20 @@ class LiveEngine:
         )
         conviction = float(blended["combined"].iloc[-1])
 
+        # Horizon from whichever strategy is actually driving this bar.
+        mom_contrib = abs(float(blended["momentum"].iloc[-1]))
+        rev_contrib = abs(float(blended["reversion"].iloc[-1]))
+        if self.config.edge_horizon_bars is not None:
+            horizon = float(self.config.edge_horizon_bars)
+        elif mom_contrib + rev_contrib > 0:
+            horizon = (
+                mom_contrib * self.momentum.expected_holding_bars
+                + rev_contrib * self.reversion.expected_holding_bars
+            ) / (mom_contrib + rev_contrib)
+        else:
+            horizon = self.momentum.expected_holding_bars
+        horizon = max(1.0, horizon)
+
         returns = log_returns(frame["close"])
         bar_vol = ewma_volatility(returns, halflife=30.0).iloc[-1]
         if not np.isfinite(bar_vol) or bar_vol <= 0:
@@ -311,15 +329,13 @@ class LiveEngine:
                                self.risk.limits.max_gross_weight))
 
         # Expected move over the holding horizon, in bps.
-        edge_bps = abs(conviction) * float(bar_vol) * np.sqrt(self.config.edge_horizon_bars) * 1e4
+        edge_bps = abs(conviction) * float(bar_vol) * np.sqrt(horizon) * 1e4
 
         # A session drift is an expected move in its own right, so it belongs in
         # the number the cost gate tests -- but only when it points the same way
         # as the position. A tilt opposing the trade is not extra edge.
         if self._session is not None and target != 0.0:
-            drift_bps = self._session.expected_drift_bps(
-                frame.index[-1], self.config.edge_horizon_bars
-            )
+            drift_bps = self._session.expected_drift_bps(frame.index[-1], horizon)
             if np.sign(drift_bps) == np.sign(target):
                 edge_bps += abs(drift_bps)
 

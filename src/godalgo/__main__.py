@@ -4,6 +4,8 @@
     python -m godalgo evolve   --symbol BTC/USDT --candidates 16
     python -m godalgo ledger
     python -m godalgo live      --symbol BTC/USDT --bar-seconds 60 --mode paper
+    python -m godalgo feasibility --symbol BTC/USDT --timeframe 1h
+    python -m godalgo preflight   --symbol BTC/USDT
 
 Deliberately thin. It wires existing components together and prints results; it
 holds no strategy logic of its own, so anything that works here works identically
@@ -148,6 +150,75 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_feasibility(args: argparse.Namespace) -> int:
+    """Can this configuration clear its costs at this frequency?
+
+    Answered from a real backtest rather than assumptions: realised volatility,
+    the conviction the strategies actually produce, and their blended holding
+    period. Worth running before anything else -- a bot that will not trade is
+    usually being told, correctly, that its frequency is not viable.
+    """
+    from godalgo.backtest.engine import BacktestConfig, run_backtest
+    from godalgo.data.feed import bars_per_day, timeframe_to_minutes
+    from godalgo.execution.broker import FeeSchedule
+    from godalgo.feasibility import assess_from_backtest
+
+    bars = _load_bars(args)
+    bar_seconds = timeframe_to_minutes(args.timeframe) * 60
+
+    momentum, reversion = MomentumStrategy(), MeanReversionStrategy()
+    config = BacktestConfig(bars_per_day=bars_per_day(args.timeframe))
+    result = run_backtest(bars, momentum, reversion, config, args.symbol)
+
+    report = assess_from_backtest(
+        result, bar_seconds, momentum, reversion,
+        fees=FeeSchedule(maker=args.maker_fee, taker=args.taker_fee),
+        spread_bps=args.spread_bps,
+        min_edge_multiple=config.min_edge_multiple,
+    )
+    print(report.describe())
+    print()
+    print(f"  momentum holds  {momentum.expected_holding_bars:.0f} bars")
+    print(f"  reversion holds {reversion.expected_holding_bars:.0f} bars")
+    return 0 if report.tradeable_as_maker else 1
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """Validate everything an order depends on, without sending one."""
+    from godalgo.execution.live import ArmingError, LiveBroker
+
+    async def run() -> int:
+        try:
+            broker = LiveBroker(arm=True)
+        except ArmingError as exc:
+            print(f"not armed: {exc}", file=sys.stderr)
+            return 2
+        try:
+            report = await broker.preflight(args.symbol)
+        finally:
+            await broker.close()
+
+        print(f"exchange        {report['exchange']}")
+        print(f"symbol          {report['symbol']}")
+        market = report["market"]
+        print(f"amount precision {market['amount_precision']}  "
+              f"min amount {market['min_amount']}")
+        print(f"price precision  {market['price_precision']}  "
+              f"min notional {market['min_notional']}")
+        print(f"fees            maker={market['maker_fee']} taker={market['taker_fee']}")
+        if "round_trip_bps" in report:
+            rt = report["round_trip_bps"]
+            print(f"round trip      maker {rt['maker']:.1f}bps / taker {rt['taker']:.1f}bps")
+        print(f"equity          {report.get('equity')}")
+        print(f"position        {report.get('existing_position')}")
+        print(f"open orders     {report.get('open_orders')}")
+        for warning in report["warnings"]:
+            print(f"  WARNING: {warning}")
+        return 0 if report["ok"] else 1
+
+    return asyncio.run(run())
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run the autonomous loop.
 
@@ -276,6 +347,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="0 retries forever; a positive value halts once exhausted",
     )
     p_live.set_defaults(func=cmd_live)
+
+    p_feas = sub.add_parser(
+        "feasibility", help="can this configuration clear its costs at this frequency?"
+    )
+    add_data_args(p_feas)
+    p_feas.add_argument("--maker-fee", type=float, default=0.0002)
+    p_feas.add_argument("--taker-fee", type=float, default=0.0006)
+    p_feas.add_argument("--spread-bps", type=float, default=2.0)
+    p_feas.set_defaults(func=cmd_feasibility)
+
+    p_pre = sub.add_parser(
+        "preflight", help="validate venue, credentials, and symbol without trading"
+    )
+    p_pre.add_argument("--symbol", default="BTC/USDT")
+    p_pre.set_defaults(func=cmd_preflight)
 
     p_led = sub.add_parser("ledger", help="show promotion history")
     p_led.add_argument("--tail", type=int, default=20)

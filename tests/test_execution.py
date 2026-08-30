@@ -284,3 +284,105 @@ def test_staleness_is_measurable():
         agg.on_tick(100.0, 1.0, t + timedelta(seconds=i))
     age = agg.last_bar_age(t + timedelta(seconds=600))
     assert age is not None and age.total_seconds() > 300
+
+
+# --- scale-invariant no-trade band ----------------------------------------
+
+def test_relative_band_scales_with_position_size():
+    """The bug this replaced.
+
+    An absolute "2% of equity" band blocks nearly every trade on a
+    high-volatility asset, where vol targeting keeps positions small, while
+    waving marginal ones through on a quiet asset. A relative band means the
+    same thing at any scale.
+    """
+    r = OrderRouter(RoutingConfig(min_relative_change=0.15))
+
+    # Small target, proportionally large step -> allowed.
+    small = r.decide("BTC/USDT", 0.010, 0.000, 100_000.0, book(), expected_edge_bps=50.0)
+    assert small.should_trade
+
+    r.mark_settled("BTC/USDT")
+
+    # Large target, proportionally tiny step -> refused.
+    large = r.decide("BTC/USDT", 0.500, 0.490, 100_000.0, book(), expected_edge_bps=50.0)
+    assert not large.should_trade
+    assert "position scale" in large.reason
+
+
+def test_absolute_floor_still_blocks_dust():
+    r = OrderRouter(RoutingConfig(min_weight_change=0.001))
+    d = r.decide("BTC/USDT", 0.0001, 0.0, 100_000.0, book(), expected_edge_bps=500.0)
+    assert not d.should_trade
+    assert "absolute floor" in d.reason
+
+
+def test_full_exit_bypasses_the_relative_band():
+    """A stop that declines to fire because the step looks small is not a stop."""
+    r = OrderRouter(RoutingConfig(min_relative_change=0.9))
+    d = r.decide("BTC/USDT", 0.0, 0.02, 100_000.0, book(), expected_edge_bps=0.0)
+    assert d.should_trade
+    assert d.order.reduce_only
+
+
+def test_relative_change_bounds_are_validated():
+    with pytest.raises(ValueError, match="min_relative_change"):
+        RoutingConfig(min_relative_change=1.0)
+
+
+# --- venue precision -------------------------------------------------------
+
+def test_router_uses_venue_precision_when_supplied():
+    from godalgo.execution.market import MarketSpec
+
+    spec = MarketSpec("BTC/USDT", amount_precision=3, price_precision=1,
+                      min_notional=10.0, is_default=False)
+    r = OrderRouter(RoutingConfig(), market=spec)
+    d = r.decide("BTC/USDT", 0.5, 0.0, 100_000.0, book(bid=50_000.55, ask=50_010.55),
+                 expected_edge_bps=100.0)
+    assert d.should_trade
+    # Amount quantised to 3dp, buy price rounded down onto the venue grid.
+    assert d.order.amount == round(d.order.amount, 3)
+    assert d.order.price <= 50_000.55
+
+
+def test_venue_minimum_overrides_configured_minimum():
+    from godalgo.execution.market import MarketSpec
+
+    spec = MarketSpec("BTC/USDT", min_notional=5_000.0, is_default=False)
+    r = OrderRouter(RoutingConfig(min_notional=1.0), market=spec)
+    d = r.decide("BTC/USDT", 0.01, 0.0, 100_000.0, book(), expected_edge_bps=500.0)
+    assert not d.should_trade
+    assert "below venue minimum" in d.reason
+
+
+# --- holding period --------------------------------------------------------
+
+def test_strategies_declare_realistic_holding_periods():
+    """Regression.
+
+    A hardcoded 3-bar horizon understated momentum's edge by ~3x -- expected
+    move scales with sqrt(hold) -- and silently refused trades that comfortably
+    cleared their costs.
+    """
+    from godalgo.strategies.mean_reversion import MeanReversionStrategy
+    from godalgo.strategies.momentum import MomentumStrategy
+
+    assert MomentumStrategy().expected_holding_bars > 10
+    assert MeanReversionStrategy().expected_holding_bars > 10
+
+
+def test_momentum_holding_tracks_its_lookbacks():
+    from godalgo.strategies.momentum import MomentumParams, MomentumStrategy
+
+    slow = MomentumStrategy(MomentumParams(fast_lookback=50, slow_lookback=300))
+    fast = MomentumStrategy(MomentumParams(fast_lookback=5, slow_lookback=40))
+    assert slow.expected_holding_bars > fast.expected_holding_bars
+
+
+def test_reversion_holding_tracks_its_half_life_band():
+    from godalgo.strategies.mean_reversion import MeanReversionParams, MeanReversionStrategy
+
+    slow = MeanReversionStrategy(MeanReversionParams(min_half_life=5.0, max_half_life=300.0))
+    fast = MeanReversionStrategy(MeanReversionParams(min_half_life=1.0, max_half_life=25.0))
+    assert slow.expected_holding_bars > fast.expected_holding_bars

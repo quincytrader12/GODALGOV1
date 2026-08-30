@@ -52,6 +52,51 @@ python -m godalgo ledger
 pytest                     # 112 tests
 ```
 
+## What frequency can it trade?
+
+There is an arithmetic answer, and it is worth knowing before running anything.
+
+**Volatility scales as √time. Costs do not scale at all.** Expected move over a
+holding period is `σ_annual · √(T_bar · hold / T_year)`, while a round trip costs
+a fixed number of bps — the spread plus two fees — regardless of bar length.
+Shorten the bar and edge shrinks as √T while cost stays put. Below some bar
+length, no signal pays for itself.
+
+Minimum viable bar, at 60% annual vol and 0.30 conviction:
+
+| holding period | maker (4bp) | taker (16bp) |
+|---|---|---|
+| 3 bars | 117s | 31 min |
+| 25 bars | **14s** | 3.7 min |
+| 50 bars | 7s | 112s |
+
+Only two things move that floor: **hold longer** (edge grows as √hold) or **stop
+crossing the spread** (maker vs taker is ~4× in cost, ~16× in bar length).
+Lowering the edge gate is not on the list — it does not create edge, it only
+stops measuring it.
+
+Run `python -m godalgo feasibility --symbol BTC/USDT --timeframe 1h` to get this
+for your own config, computed from a real backtest rather than assumptions —
+realised volatility, the conviction the strategies actually produce, and their
+blended holding period.
+
+### Why it wasn't trading
+
+Earlier this refused every trade at default settings. Two causes, both fixed:
+
+1. **The edge horizon was hardcoded to 3 bars.** Momentum with a 20–100 bar
+   lookback holds ~28 bars; mean reversion holds ~its half-life, ~51. Expected
+   move scales with √hold, so a 3-bar assumption understated momentum's edge by
+   **3.03×** and refused trades that cleared their costs comfortably. Holding
+   period is now derived from each strategy's own parameters.
+2. **The no-trade band was absolute.** "2% of equity" means something completely
+   different when vol targeting caps positions at 0.15 versus 1.0 — it blocked
+   nearly everything on a volatile asset. The band is now a fraction of the
+   intended position size, so it is scale-invariant.
+
+At default settings the same run now sends 8 orders / 9 fills instead of zero,
+while still refusing 17 of 25 decisions — selective, not permissive.
+
 ## Execution
 
 Event-driven and autonomous. To be clear about scope: this is **not** HFT in the
@@ -116,6 +161,8 @@ flattened the position.
 | **In-flight dedupe** | One order per symbol; a signal cannot become a double position |
 | **Stale book** | Refuses to price passively against a book older than 10s |
 | **Decision timeout** | A wedged decision halts rather than freezing the bot in position |
+| **Venue precision** | Order size and price quantised to the venue's own rules, read from `load_markets()` |
+| **Preflight** | `godalgo preflight` validates venue, credentials, symbol, limits and fees before any order |
 
 Credentials are read from the environment only, never accepted as arguments and
 never written to disk.

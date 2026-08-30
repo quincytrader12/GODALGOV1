@@ -30,6 +30,7 @@ from typing import Self
 import ccxt.async_support as ccxt_async
 
 from godalgo.execution.broker import Broker
+from godalgo.execution.market import MarketSpec, spec_from_ccxt_market
 from godalgo.execution.types import (
     Order,
     OrderResult,
@@ -129,6 +130,100 @@ class LiveBroker(Broker):
             "LiveBroker ARMED on %s (%s) -- orders will use real funds",
             self.config.exchange_id, self.config.symbol_type,
         )
+
+    async def load_market(self, symbol: str) -> MarketSpec:
+        """Read the venue's rules for a symbol.
+
+        Must be called before trading. Order precision, tick size, and minimum
+        notional are per-symbol and venue-specific; sending orders shaped by
+        guessed values is the most common way a live session fails on its very
+        first order, and the resulting venue error rarely says which rule broke.
+        """
+        markets = await self._exchange.load_markets()
+        market = markets.get(symbol)
+        if market is None:
+            close = [m for m in markets if symbol.split("/")[0] in m][:5]
+            raise ValueError(
+                f"{self.config.exchange_id} does not list {symbol!r}"
+                + (f" -- did you mean one of {close}?" if close else "")
+            )
+        spec = spec_from_ccxt_market(market)
+        logger.info(
+            "market %s: amount precision %d (min %s), price precision %d, "
+            "min notional %.2f, fees maker=%s taker=%s",
+            symbol, spec.amount_precision, spec.min_amount, spec.price_precision,
+            spec.min_notional, spec.maker_fee, spec.taker_fee,
+        )
+        return spec
+
+    async def preflight(self, symbol: str) -> dict[str, object]:
+        """Validate everything an order depends on, without sending one.
+
+        Checked here rather than discovered at the first order, because the
+        first order is the worst possible moment to learn that the symbol is
+        misspelled, the key lacks trade permission, or the account is empty.
+
+        Returns a report of what was verified. Raises only on failures that make
+        trading impossible; softer problems appear as warnings in the report so
+        the caller can decide.
+        """
+        report: dict[str, object] = {"exchange": self.config.exchange_id, "symbol": symbol}
+        warnings: list[str] = []
+
+        spec = await self.load_market(symbol)
+        report["market"] = {
+            "amount_precision": spec.amount_precision,
+            "price_precision": spec.price_precision,
+            "min_amount": spec.min_amount,
+            "min_notional": spec.min_notional,
+            "maker_fee": spec.maker_fee,
+            "taker_fee": spec.taker_fee,
+        }
+
+        # Credentials must actually authorise trading, not merely authenticate.
+        try:
+            equity = await self.equity()
+            report["equity"] = equity
+            if equity <= 0:
+                warnings.append("account equity is zero -- no order can be funded")
+        except ccxt_async.AuthenticationError as exc:
+            raise ArmingError(f"credentials rejected by {self.config.exchange_id}: {exc}") from exc
+
+        try:
+            position = await self.position(symbol)
+            report["existing_position"] = position.quantity
+            if not position.is_flat:
+                warnings.append(
+                    f"starting with a non-flat position ({position.quantity:+.8f}); "
+                    "the bot will reconcile to it, not ignore it"
+                )
+        except ccxt_async.BaseError as exc:
+            warnings.append(f"could not read position: {exc}")
+
+        try:
+            resting = await self.open_orders(symbol)
+            report["open_orders"] = len(resting)
+            if resting:
+                warnings.append(
+                    f"{len(resting)} order(s) already resting; the kill switch "
+                    "will cancel them"
+                )
+        except ccxt_async.BaseError as exc:
+            warnings.append(f"could not read open orders: {exc}")
+
+        if spec.maker_fee is not None and spec.taker_fee is not None:
+            maker_rt = 2 * spec.maker_fee * 1e4
+            taker_rt = 2 * spec.taker_fee * 1e4
+            report["round_trip_bps"] = {"maker": maker_rt, "taker": taker_rt}
+            if spec.maker_fee >= spec.taker_fee:
+                warnings.append(
+                    "venue reports maker fee >= taker fee; post-only gains "
+                    "nothing here, reconsider use_post_only"
+                )
+
+        report["warnings"] = warnings
+        report["ok"] = not any("rejected" in w for w in warnings)
+        return report
 
     async def close(self) -> None:
         """Release the underlying HTTP session."""
@@ -287,12 +382,19 @@ class LiveBroker(Broker):
 
         results = []
         for raw in raws:
+            price = float(raw["price"]) if raw.get("price") else None
+            # Not every venue reports a price on every open order (stops and
+            # market orders in particular). Describing such an order as LIMIT
+            # with no price fails Order's own validation and would take down the
+            # whole listing -- including during a kill-switch cancel_all, which
+            # is the worst possible moment.
+            order_type = OrderType.LIMIT if price is not None else OrderType.MARKET
             placeholder = Order(
                 symbol=raw.get("symbol") or symbol or "UNKNOWN",
-                side=OrderSide(raw.get("side", "buy")),
+                side=OrderSide(str(raw.get("side") or "buy").lower()),
                 amount=float(raw.get("amount") or 0.0) or 1e-12,
-                order_type=OrderType(raw.get("type", "limit")),
-                price=float(raw["price"]) if raw.get("price") else None,
+                order_type=order_type,
+                price=price,
                 time_in_force=TimeInForce.GTC,
                 client_order_id=LiveBroker._client_id_of(raw) or "unknown",
             )
@@ -323,7 +425,7 @@ class LiveBroker(Broker):
             # Spot: the position is the base-currency balance.
             balance = await self._exchange.fetch_balance()
             base = symbol.split("/")[0]
-            return Position(symbol=symbol, quantity=float(balance.get(base, {}).get("total") or 0.0))
+            return Position(symbol=symbol, quantity=_balance_of(balance, base))
         except ccxt_async.BaseError as exc:
             logger.error("position fetch failed for %s: %s", symbol, exc)
             raise
@@ -334,4 +436,21 @@ class LiveBroker(Broker):
         for quote in ("USDT", "USD", "USDC", "BUSD"):
             if quote in total:
                 return float(total[quote])
+            if quote in balance:
+                return float((balance[quote] or {}).get("total") or 0.0)
         raise ValueError(f"could not determine quote equity from {sorted(total)}")
+
+
+def _balance_of(balance: dict, currency: str) -> float:
+    """Read a currency's total from either ccxt balance shape.
+
+    ccxt populates both ``balance[CUR]["total"]`` and ``balance["total"][CUR]``,
+    but not every venue fills both. Reading only one silently reports a zero
+    position -- and a bot that believes it is flat when it is not will happily
+    open a second position on top of the first.
+    """
+    entry = balance.get(currency)
+    if isinstance(entry, dict) and entry.get("total") is not None:
+        return float(entry["total"])
+    totals = balance.get("total") or {}
+    return float(totals.get(currency) or 0.0)

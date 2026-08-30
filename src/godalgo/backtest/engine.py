@@ -97,8 +97,17 @@ class BacktestConfig:
     0.0 to disable the gate.
     """
 
-    edge_horizon_bars: float = 3.0
-    """Bars the expected-edge estimate is projected over. Matches the live engine."""
+    edge_horizon_bars: float | None = None
+    """Bars the expected-edge estimate is projected over.
+
+    ``None`` -- the default -- derives it from the strategies' own
+    ``expected_holding_bars``, blend-weighted by which one is actually driving
+    the signal. Prefer that: a hardcoded horizon understates edge whenever it is
+    shorter than the real holding period, and expected move scales with its
+    square root, so the error compounds into refusing viable trades.
+
+    Set a number only to override deliberately.
+    """
 
     session: SessionConfig | None = None
     """Overnight/session drift overlay. ``None`` disables it.
@@ -251,6 +260,36 @@ def compute_session_tilt(
     return pd.Series(tilts, index=close.index, name="session_tilt")
 
 
+def _blended_holding_bars(
+    blended: pd.DataFrame,
+    momentum: Strategy,
+    reversion: Strategy,
+    override: float | None,
+) -> pd.Series:
+    """Per-bar holding horizon, weighted by which strategy drives the signal.
+
+    Momentum and mean reversion hold for very different lengths of time -- a
+    trend position persists for tens of bars, a reversion trade for about its
+    half-life. Using one constant for both misprices the edge of whichever is
+    actually active.
+
+    Falls back to the momentum horizon on bars where neither strategy has any
+    conviction; the edge there is zero regardless, so the horizon is moot.
+    """
+    if override is not None:
+        return pd.Series(float(override), index=blended.index)
+
+    mom_hold = momentum.expected_holding_bars
+    rev_hold = reversion.expected_holding_bars
+
+    mom_w = blended["momentum"].abs()
+    rev_w = blended["reversion"].abs()
+    total = mom_w + rev_w
+
+    weighted = (mom_w * mom_hold + rev_w * rev_hold) / total.replace(0.0, np.nan)
+    return weighted.fillna(mom_hold).clip(lower=1.0)
+
+
 def run_backtest(
     bars: pd.DataFrame,
     momentum: Strategy,
@@ -332,8 +371,9 @@ def run_backtest(
     # Economic gate, applied before the turnover buffer so that a trade which
     # cannot pay for itself is never proposed in the first place.
     bar_vol = ewma_volatility(np.log(close).diff(), halflife=30.0)
+    horizon = _blended_holding_bars(blended, momentum, reversion, cfg.edge_horizon_bars)
     expected_edge_bps = (
-        blended["combined"].abs() * bar_vol * np.sqrt(cfg.edge_horizon_bars) * 1e4
+        blended["combined"].abs() * bar_vol * np.sqrt(horizon) * 1e4
     ).fillna(0.0)
     round_trip_cost_bps = 2.0 * (cfg.costs.fee_rate + cfg.costs.slippage_rate) * 1e4
 
@@ -403,6 +443,10 @@ def run_backtest(
             "variance_ratio": regime_frame["variance_ratio"],
             "w_momentum": blended["w_momentum"],
             "w_reversion": blended["w_reversion"],
+            # Post-weight contributions, kept for attribution: how much of the
+            # final conviction each book actually supplied.
+            "contrib_momentum": blended["momentum"],
+            "contrib_reversion": blended["reversion"],
             "session_tilt": blended.get("session_tilt", pd.Series(0.0, index=timestamps)),
             "combined": blended["combined"],
             "vol_scalar": vol_scalar,

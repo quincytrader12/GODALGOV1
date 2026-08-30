@@ -111,6 +111,19 @@ class MomentumStrategy(Strategy):
         self.params: MomentumParams
 
     @property
+    def expected_holding_bars(self) -> float:
+        """Roughly half the mean signal horizon.
+
+        A trend signal built from an N-bar lookback does not reverse every bar;
+        it persists until the trend it measures decays. Half the mean horizon is
+        the standard rule of thumb for trend systems and is deliberately
+        conservative -- understating the hold understates edge, which errs
+        toward not trading rather than toward trading badly.
+        """
+        horizons = self.params.horizons()
+        return max(1.0, float(np.mean(horizons)) / 2.0)
+
+    @property
     def warmup(self) -> int:
         # The slow lookback plus room for the EWMA vol estimate to stabilise.
         return int(self.params.slow_lookback + 3 * self.params.vol_halflife)

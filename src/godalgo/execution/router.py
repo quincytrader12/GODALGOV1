@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 
 from godalgo.execution.broker import BookSnapshot, FeeSchedule
+from godalgo.execution.market import MarketSpec
 from godalgo.execution.types import (
     Order,
     OrderSide,
@@ -53,8 +54,26 @@ class RoutingConfig:
     min_notional: float = 10.0
     """Venue minimum order size in quote currency."""
 
-    min_weight_change: float = 0.02
-    """Smallest position change worth an order, as a fraction of equity."""
+    min_weight_change: float = 0.001
+    """Absolute floor on a tradeable position change, as a fraction of equity.
+
+    A backstop against zero-size orders only. It is deliberately small, because
+    an absolute band is the wrong instrument: volatility targeting scales
+    positions to the asset, so a fixed "2% of equity" band blocks nearly every
+    trade on a high-volatility asset (where positions are small) while waving
+    through marginal ones on a quiet asset.
+
+    The real constraints are ``min_relative_change`` below, the economic edge
+    gate, and the venue's minimum notional -- all of which scale correctly.
+    """
+
+    min_relative_change: float = 0.15
+    """No-trade band as a fraction of the intended position size.
+
+    Scale-invariant: a 15% band means the same thing whether the target is 5% of
+    equity or 100% of it. This is what actually suppresses churn, and replaces
+    the absolute band that used to do the job badly.
+    """
 
     max_spread_bps: float = 20.0
     """Refuse to trade when the book is wider than this.
@@ -80,6 +99,12 @@ class RoutingConfig:
 
     amount_precision: int = 8
     price_precision: int = 2
+    """Fallback precision, used only when no ``MarketSpec`` is supplied.
+
+    Adequate for paper and dry run. Never adequate for a live venue -- real
+    precision is per-symbol and must be read from the exchange, or orders are
+    rejected on formatting alone.
+    """
 
     def __post_init__(self) -> None:
         if self.min_edge_multiple < 1.0:
@@ -88,6 +113,11 @@ class RoutingConfig:
             )
         if self.min_notional <= 0 or self.min_weight_change <= 0:
             raise ValueError("min_notional and min_weight_change must be positive")
+        if not 0.0 <= self.min_relative_change < 1.0:
+            raise ValueError(
+                "min_relative_change must be in [0, 1); at 1.0 or above no "
+                f"position could ever be built, got {self.min_relative_change}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +142,8 @@ class OrderRouter:
 
     config: RoutingConfig = field(default_factory=RoutingConfig)
     fees: FeeSchedule = field(default_factory=FeeSchedule)
+    market: MarketSpec | None = None
+    """Venue rules for the traded symbol. Load from the exchange before going live."""
     _submission_times: list[float] = field(default_factory=list, init=False)
     _in_flight: dict[str, str] = field(default_factory=dict, init=False)
 
@@ -163,7 +195,18 @@ class OrderRouter:
             )
 
         if abs(delta) < self.config.min_weight_change:
-            return refuse(f"weight change {abs(delta):.4f} below minimum")
+            return refuse(f"weight change {abs(delta):.5f} below absolute floor")
+
+        # Scale-invariant band: judged against the size of the position being
+        # built, not against equity. A full exit is always allowed through --
+        # refusing to flatten because the step looks small is how a small
+        # position becomes a permanent one.
+        scale = max(abs(target_weight), abs(current_weight))
+        if target_weight != 0.0 and scale > 0 and abs(delta) < self.config.min_relative_change * scale:
+            return refuse(
+                f"weight change {abs(delta):.5f} is under {self.config.min_relative_change:.0%} "
+                f"of position scale {scale:.4f}"
+            )
 
         if book.spread_bps > self.config.max_spread_bps:
             return refuse(f"spread {book.spread_bps:.1f}bps exceeds maximum")
@@ -198,7 +241,13 @@ class OrderRouter:
         price = self._limit_price(book, side)
         amount = self._amount_for(abs(delta), equity, price)
 
-        if amount * price < self.config.min_notional:
+        # Venue rules take precedence over our configured minimum: the venue
+        # will reject on its own terms regardless of what we consider tradeable.
+        if self.market is not None:
+            ok, why = self.market.is_tradeable(amount, price)
+            if not ok:
+                return refuse(why, cost=cost_bps)
+        elif amount * price < self.config.min_notional:
             return refuse(
                 f"notional {amount * price:.2f} below venue minimum "
                 f"{self.config.min_notional:.2f}",
@@ -225,15 +274,23 @@ class OrderRouter:
         )
 
     def _limit_price(self, book: BookSnapshot, side: OrderSide) -> float:
-        """Passive price, offset inside the touch if configured."""
+        """Passive price, offset inside the touch and quantised to the venue grid."""
         base = book.passive_for(side)
         if self.config.passive_offset_bps:
             offset = base * self.config.passive_offset_bps / 1e4
             base = base - offset if side is OrderSide.BUY else base + offset
+
+        if self.market is not None:
+            # Rounds away from the touch, so quantisation can only make a
+            # post-only order more passive -- never accidentally crossing.
+            return self.market.round_price(base, side_is_buy=side is OrderSide.BUY)
         return round(base, self.config.price_precision)
 
     def _amount_for(self, weight_delta: float, equity: float, price: float) -> float:
-        return round(weight_delta * equity / price, self.config.amount_precision)
+        raw = weight_delta * equity / price
+        if self.market is not None:
+            return self.market.round_amount(raw)
+        return round(raw, self.config.amount_precision)
 
     def _throttle_allows(self) -> bool:
         now = time.monotonic()

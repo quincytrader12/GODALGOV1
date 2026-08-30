@@ -124,6 +124,22 @@ class Strategy(ABC):
 
     @property
     @abstractmethod
+    def expected_holding_bars(self) -> float:
+        """Typical bars a position is held once opened.
+
+        Used to convert conviction into an expected move, which the cost gate
+        tests against. Getting it wrong is expensive in one specific direction:
+        expected edge scales with the square root of the holding period, so
+        assuming a 3-bar hold for a strategy that actually holds 30 bars
+        understates its edge by a factor of ~3 and silently refuses trades that
+        would comfortably clear their costs.
+
+        Estimated from the strategy's own parameters rather than configured, so
+        it stays consistent when the search loop retunes them.
+        """
+
+    @property
+    @abstractmethod
     def warmup(self) -> int:
         """Bars required before the strategy emits a non-zero signal.
 

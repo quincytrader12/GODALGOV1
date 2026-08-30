@@ -312,6 +312,30 @@ arithmetic**. A round trip costs the spread plus two fees. At a 2bp spread and
 is profitable in a backtest and loses money against a real venue. Executing a
 losing trade faster only loses faster.
 
+### The frequency floor
+
+Expected move over a holding period is `σ_annual · √(T_bar · hold / T_year)`;
+round-trip cost is a fixed number of bps. Edge scales with √time, cost does not
+scale at all, so there is a bar length below which nothing is tradeable:
+
+| holding period | min bar (maker 4bp) | min bar (taker 16bp) |
+|---|---|---|
+| 3 bars | 117s | 31 min |
+| 25 bars | 14s | 3.7 min |
+| 50 bars | 7s | 112s |
+
+Two levers, and only two: hold longer (edge grows as √hold, so 16× the hold
+buys a 16× shorter bar) or stop crossing the spread (~4× in cost, ~16× in bar
+length). Lowering the edge multiple is not a lever — it does not create edge,
+it only stops measuring it.
+
+This makes the **holding period** the term the answer is most sensitive to, and
+it must come from the strategy rather than be assumed. A momentum book with a
+20–100 bar lookback holds ~28 bars; an OU reversion book holds about its
+half-life. Assuming 3 bars for either understates edge by ~3× and refuses
+trades that clear their costs — which is exactly what a bot that "won't trade"
+is usually suffering from.
+
 Hence the router's economic gate: expected edge must exceed modelled round-trip
 cost by a margin (default 1.5×) before an order is sent. Declining to trade is a
 valid output, and usually the right one.
