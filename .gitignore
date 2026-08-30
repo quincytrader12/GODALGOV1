@@ -31,3 +31,6 @@ credentials.json
 .DS_Store
 .idea/
 .vscode/
+dist/
+build/
+*.spec

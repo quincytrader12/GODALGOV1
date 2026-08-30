@@ -352,3 +352,61 @@ html, body {
   }
   #rail { grid-template-rows: auto auto auto; }
 }
+
+
+/* ---------- mode switch ---------- */
+
+.mode-switch { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 2px; overflow: hidden; }
+.mode-switch button {
+  background: none; border: none; border-right: 1px solid var(--line);
+  color: var(--text-dim); font-family: var(--mono); font-size: 9px;
+  letter-spacing: 0.12em; padding: 3px 9px; cursor: pointer;
+}
+.mode-switch button:last-child { border-right: none; }
+.mode-switch button:hover { color: var(--text-bright); background: var(--bg-raised); }
+.mode-switch button.active { background: var(--cyan-dim); color: var(--bg); }
+.mode-switch button.danger:hover { color: var(--red); }
+.mode-switch button.danger.active { background: var(--red); color: #fff; }
+.mode-switch button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ---------- modal ---------- */
+
+.modal {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(3, 5, 9, 0.82);
+}
+
+/* Load-bearing. The browser hides [hidden] elements with a UA rule of the
+   lowest specificity, so the .modal class above wins and the element stays a
+   full-screen overlay -- invisible, but intercepting every click in the app.
+   Without this the entire UI is unusable while the modal is "closed". */
+.modal[hidden] { display: none; }
+.modal-box {
+  width: 420px; max-width: 92vw;
+  background: var(--bg-panel); border: 1px solid var(--red);
+  border-radius: 3px; padding: 18px 20px;
+  box-shadow: 0 0 40px rgba(255, 59, 71, 0.25);
+}
+.modal-box h2 {
+  font-size: 12px; letter-spacing: 0.2em; color: var(--red);
+  text-transform: uppercase; margin-bottom: 10px; font-weight: 600;
+}
+.modal-box .kv { padding: 8px 0; }
+.modal-box input {
+  width: 100%; margin-top: 6px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--text-bright);
+  font-family: var(--mono); font-size: 12px; padding: 7px 9px; border-radius: 2px;
+  letter-spacing: 0.1em;
+}
+.modal-box input:focus { outline: none; border-color: var(--red); }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.modal-actions button {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+  padding: 7px 14px; border-radius: 2px; cursor: pointer; text-transform: uppercase;
+}
+.modal-actions .ghost { background: none; border: 1px solid var(--line); color: var(--text-dim); }
+.modal-actions .ghost:hover { border-color: var(--cyan-dim); color: var(--cyan); }
+.modal-actions .danger { background: var(--red); border: 1px solid var(--red); color: #fff; }
+.modal-actions .danger:hover { background: #ff5560; }
+.modal-actions .danger:disabled { opacity: 0.4; cursor: not-allowed; }

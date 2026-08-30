@@ -1060,6 +1060,7 @@ function renderBrain(b, h) {
   const pill = $('h-mode');
   pill.textContent = b.mode.toUpperCase();
   pill.classList.toggle('live', b.mode === 'live');
+  if (modeState.mode !== b.mode) { modeState.mode = b.mode; renderMode(); }
 
   $('b-regime').textContent = b.regime;
   $('b-conv').firstChild.textContent = fmt(b.conviction, 3);
@@ -1217,3 +1218,104 @@ connect();
 loadConnections();
 loadJournal();
 setInterval(loadJournal, 15000);
+
+
+/* ------------------------------------------------------------ mode switch
+ *
+ * The interface can *request* live trading; it cannot authorise it. Arming
+ * lives in the environment and the confirmation phrase is checked server-side,
+ * so a compromised or mis-clicked page cannot start trading real money on its
+ * own. Everything here is presentation over a decision made elsewhere.
+ */
+
+const modeState = { available: false, mode: 'dry_run', liveArmed: false, liveAvailable: false };
+
+async function loadMode() {
+  try {
+    const r = await fetch('/api/mode');
+    const d = await r.json();
+    modeState.available = !!d.available;
+    modeState.mode = d.mode || 'dry_run';
+    modeState.liveArmed = !!d.live_armed;
+    modeState.liveAvailable = !!d.live_available;
+    if (d.confirm_phrase) $('live-phrase').textContent = d.confirm_phrase;
+    renderMode();
+  } catch { /* server not up yet */ }
+}
+
+function renderMode() {
+  document.querySelectorAll('#mode-switch button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.mode === modeState.mode);
+    // Disabling the control when there is nothing to switch is honest; a
+    // button that silently does nothing is worse than one that says it cannot.
+    b.disabled = !modeState.available
+      || (b.dataset.mode === 'live' && !modeState.liveAvailable);
+    b.title = b.dataset.mode === 'live' && !modeState.liveAvailable
+      ? 'live requires GODALGO_ARM_LIVE and API credentials in the environment'
+      : '';
+  });
+}
+
+async function requestMode(mode, confirm) {
+  const r = await fetch('/api/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, confirm }),
+  });
+  const body = await r.json();
+  if (!r.ok) throw new Error(body.detail || 'mode change refused');
+  modeState.mode = body.mode;
+  renderMode();
+  return body;
+}
+
+document.querySelectorAll('#mode-switch button').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const mode = btn.dataset.mode;
+    if (mode === modeState.mode) return;
+    if (mode === 'live') { openLiveModal(); return; }
+    try {
+      await requestMode(mode);
+    } catch (e) {
+      $('k-msg').textContent = e.message;
+    }
+  });
+});
+
+function openLiveModal() {
+  const modal = $('live-modal');
+  $('live-error').textContent = '';
+  $('live-confirm').value = '';
+  $('live-checks').innerHTML = `
+    <dt>armed</dt><dd class="${modeState.liveArmed ? 'pos' : 'neg'}">${modeState.liveArmed ? 'yes' : 'no'}</dd>
+    <dt>credentials</dt><dd class="${modeState.liveAvailable ? 'pos' : 'neg'}">${modeState.liveAvailable ? 'present' : 'missing'}</dd>
+    <dt>on switch</dt><dd class="amber">all positions closed first</dd>`;
+  modal.hidden = false;
+  $('live-confirm').focus();
+}
+
+$('live-cancel').addEventListener('click', () => { $('live-modal').hidden = true; });
+
+$('live-modal').addEventListener('click', (e) => {
+  if (e.target === $('live-modal')) $('live-modal').hidden = true;
+});
+
+$('live-go').addEventListener('click', async () => {
+  const button = $('live-go');
+  button.disabled = true;
+  try {
+    await requestMode('live', $('live-confirm').value);
+    $('live-modal').hidden = true;
+  } catch (e) {
+    $('live-error').textContent = e.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') $('live-modal').hidden = true;
+});
+
+loadMode();
+setInterval(loadMode, 10000);

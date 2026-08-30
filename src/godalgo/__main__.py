@@ -460,11 +460,21 @@ def cmd_ui(args: argparse.Namespace) -> int:
     """
     import threading
 
+    from godalgo.execution.mode import ModeController
+    from godalgo.execution.types import TradingMode
     from godalgo.ui.server import UIBridge, run_server
     from godalgo.ui.simulator import Simulator
 
     bridge = UIBridge(starting_equity=args.equity, equity=args.equity, mode="dry_run")
     bridge.symbol = args.symbol
+
+    if not args.demo:
+        # A controller is only attached outside demo mode. In demo there is
+        # nothing to switch, and offering a control that silently does nothing
+        # is worse than one that reports itself unavailable.
+        controller = ModeController(mode=TradingMode.DRY_RUN, equity=args.equity)
+        bridge.mode_controller = controller
+        bridge.mode = controller.mode.value
 
     if args.demo:
         simulator = Simulator(bridge)

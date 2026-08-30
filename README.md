@@ -49,7 +49,7 @@ python -m godalgo backtest --symbol BTC/USDT --timeframe 1h --limit 8000
 python -m godalgo evolve   --symbol BTC/USDT --candidates 16
 python -m godalgo live     --symbol BTC/USDT --bar-seconds 60   # dry run by default
 python -m godalgo ledger
-pytest                     # 279 tests
+pytest                     # 298 tests
 ```
 
 ## What frequency can it trade?
@@ -107,16 +107,50 @@ python -m godalgo ui --demo      # fabricated positions, nothing traded
 python run-terminal.py --demo    # double-clickable launcher
 ```
 
-Build a standalone executable:
+### Building the executable
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --name godalgo-terminal \
-    --add-data "src/godalgo/ui/static:godalgo/ui/static" run-terminal.py
+python build-exe.py
 ```
 
-The `--add-data` mapping is required — without it the executable runs, serves
-the API, and 404s on the page itself.
+Produces `dist/godalgo-terminal` (~156 MB, `.exe` on Windows) — a single file
+that runs with no Python on the target machine.
+
+```bash
+./dist/godalgo-terminal --demo     # fabricated positions, nothing traded
+./dist/godalgo-terminal            # attached to a real session
+```
+
+Two things break a naive PyInstaller build, both handled by the script:
+**static files** (PyInstaller bundles imported modules, not data — without the
+mapping the binary serves the API and 404s its own page, which reads as a server
+fault) and **hidden imports** (uvicorn and ccxt resolve much of their machinery
+by name at runtime, invisible to static analysis).
+
+Verified: the built binary serves the page, JS, CSS and API, with the cluster
+live.
+
+### Switching between paper and live
+
+The header carries a **DRY / PAPER / LIVE** switch.
+
+| Switch | Requires |
+|---|---|
+| dry ↔ paper | nothing |
+| → live | `GODALGO_ARM_LIVE` **and** credentials **and** typing `GO LIVE` |
+| live → paper | nothing — reducing risk is never harder than taking it |
+
+**Every switch flattens first.** A paper position is not a real one: switching
+to live while holding one leaves the engine convinced it owns something the
+venue has never heard of, and its next decision is sized against that fiction.
+Switching *out* of live while holding one abandons real exposure with nothing
+managing its stop. A failed flatten refuses the switch outright.
+
+**The interface can request live; it cannot authorise it.** Arming lives in the
+environment and the confirmation is checked server-side, so a mis-click or a
+compromised page cannot start trading real money. The presence of an API key is
+not consent to use it — credentials alone leave the LIVE button disabled.
 
 ### What it shows
 
@@ -416,6 +450,7 @@ own stop-loss does not have a stop-loss.**
 | `execution/portfolio_driver.py` | Runs one driver per symbol; rotates the fleet |
 | `risk/stops.py` | Initial, break-even and trailing stops — ratcheted |
 | `evolve/autopilot.py` | Retunes itself while trading, behind the gate |
+| `execution/mode.py` | Guarded dry/paper/live switching |
 | `backtest/` | Engine with costs; metrics incl. deflated Sharpe and PBO |
 | `evolve/` | Purged walk-forward, parameter search, promotion gate + ledger |
 

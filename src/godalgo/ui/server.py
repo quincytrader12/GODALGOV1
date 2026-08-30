@@ -19,6 +19,7 @@ import contextlib
 import ipaddress
 import json
 import logging
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from godalgo.execution.mode import ModeController, ModeSwitchError
+from godalgo.execution.types import TradingMode
 from godalgo.ui.credentials import CredentialStore, ExchangeCredential
 from godalgo.ui.journal import TradingJournal
 from godalgo.ui.state import PositionTracker, TerminalHealth, UISnapshot
@@ -37,7 +40,24 @@ __all__ = ["UIBridge", "create_app", "run_server"]
 
 logger = logging.getLogger(__name__)
 
-_STATIC = Path(__file__).parent / "static"
+def _static_dir() -> Path:
+    """Locate the UI's static files, frozen or not.
+
+    PyInstaller unpacks bundled data to a temporary directory and points
+    ``sys._MEIPASS`` at it; the path relative to this module does not exist in
+    a onefile build. Getting this wrong produces a binary that serves the API
+    and 404s its own page, which reads as a server fault rather than a
+    packaging one.
+    """
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        candidate = Path(bundled) / "godalgo" / "ui" / "static"
+        if candidate.exists():
+            return candidate
+    return Path(__file__).parent / "static"
+
+
+_STATIC = _static_dir()
 _LOOPBACK_ONLY = "the UI holds exchange credentials and has no authentication"
 
 
@@ -55,6 +75,14 @@ class UIBridge:
     journal: TradingJournal = field(default_factory=TradingJournal)
     credentials: CredentialStore = field(default_factory=CredentialStore)
     telegram: TelegramNotifier = field(default_factory=TelegramNotifier)
+
+    mode_controller: ModeController | None = None
+    """Owns the broker and performs guarded mode switches.
+
+    Optional so the UI runs standalone in demo mode, where there is nothing to
+    switch. When absent the mode endpoints report the control as unavailable
+    rather than pretending to work.
+    """
 
     starting_equity: float = 10_000.0
     equity: float = 10_000.0
@@ -212,6 +240,49 @@ def create_app(bridge: UIBridge) -> FastAPI:
         if not bridge.credentials.remove(key):
             raise HTTPException(status_code=404, detail="no such connection")
         return JSONResponse({"ok": True, "exchanges": bridge.credentials.listing()})
+
+    @app.get("/api/mode")
+    async def mode_status() -> JSONResponse:
+        if bridge.mode_controller is None:
+            return JSONResponse({
+                "available": False,
+                "mode": bridge.mode,
+                "reason": "no trading session attached (demo view)",
+            })
+        return JSONResponse({"available": True, **bridge.mode_controller.status()})
+
+    @app.post("/api/mode")
+    async def set_mode(payload: dict[str, Any]) -> JSONResponse:
+        """Switch trading mode.
+
+        Every switch flattens first, and live additionally requires the arming
+        environment variable, credentials, and a typed confirmation. The
+        interface can request live; it cannot authorise it.
+        """
+        if bridge.mode_controller is None:
+            raise HTTPException(status_code=409, detail="no trading session attached")
+
+        requested = str(payload.get("mode") or "").strip().lower()
+        try:
+            target = TradingMode(requested)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown mode {requested!r}; expected dry_run, paper or live",
+            ) from None
+
+        try:
+            change = await bridge.mode_controller.switch(
+                target, confirm=payload.get("confirm"), note="changed from the terminal",
+            )
+        except ModeSwitchError as exc:
+            # 409 rather than 400: the request is well-formed, the system state
+            # or environment does not permit it.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        bridge.mode = target.value
+        return JSONResponse({"ok": True, "change": change.to_dict(),
+                             **bridge.mode_controller.status()})
 
     @app.post("/api/telegram/test")
     async def telegram_test() -> JSONResponse:

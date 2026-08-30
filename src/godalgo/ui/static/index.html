@@ -21,6 +21,11 @@
     <span class="stat"><span class="k">P&amp;L</span><span class="v" id="h-pnl">—</span></span>
     <span class="spacer"></span>
     <span class="stat"><span class="k">LINK</span><span class="v" id="h-link">…</span></span>
+    <div class="mode-switch" id="mode-switch">
+      <button data-mode="dry_run">DRY</button>
+      <button data-mode="paper">PAPER</button>
+      <button data-mode="live" class="danger">LIVE</button>
+    </div>
     <span class="mode-pill" id="h-mode">—</span>
   </div>
 
@@ -141,6 +146,23 @@
     </div>
   </div>
 
+</div>
+<div class="modal" id="live-modal" hidden>
+  <div class="modal-box">
+    <h2>Arm live trading</h2>
+    <p class="note warn">
+      Orders will be placed with real funds. Every open position is closed
+      before the switch.
+    </p>
+    <dl class="kv" id="live-checks"></dl>
+    <p class="note">Type <b id="live-phrase">GO LIVE</b> to confirm.</p>
+    <input type="text" id="live-confirm" placeholder="confirmation phrase" autocomplete="off">
+    <p class="note warn" id="live-error"></p>
+    <div class="modal-actions">
+      <button class="ghost" id="live-cancel">Cancel</button>
+      <button class="danger" id="live-go">Arm live</button>
+    </div>
+  </div>
 </div>
 <script src="/static/app.js"></script>
 </body>
