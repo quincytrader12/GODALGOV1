@@ -76,6 +76,33 @@ backtest predicts nothing about live behaviour.
 
 That 4× gap is why post-only is the default.
 
+### WebSocket driver
+
+`WebSocketDriver` runs the bot off ccxt.pro streams (76 venues support them).
+Four independent tasks, deliberately not one loop:
+
+| Task | Does | Why separate |
+|---|---|---|
+| trade loop | `watch_trades` → `ingest_tick` | cheap and sync, must never block |
+| book loop | `watch_order_book` → `on_book` | same |
+| decision loop | runs the expensive decision | regime refit is ~100ms; inline it would stall socket reads and drop ticks exactly when the market moves |
+| watchdog | timer-driven staleness check | a watchdog woken by data cannot detect data not arriving |
+
+The bar signal is a **single-slot latch, not a queue**. If bars complete faster
+than decisions finish, the right move is to act once on the newest state — a
+queued decision computed three bars ago would trade on information the market
+has already left behind.
+
+Reconnection uses exponential backoff with jitter (so two streams failing
+together don't reconnect in lockstep and hammer the venue). `--max-reconnects 0`
+retries forever; a positive value halts once exhausted, which is safer than a
+bot reconnecting indefinitely while holding a position nobody is watching.
+
+Verified end-to-end against a simulated exchange (real venues are unreachable
+from the dev sandbox): 142 trades → 47 bars → 24 decisions (23 coalesced by the
+latch) → 6 orders → 7 fills, and on shutdown the halt path cancelled and
+flattened the position.
+
 ### Safety
 
 | Control | Behaviour |
@@ -87,6 +114,8 @@ That 4× gap is why post-only is the default.
 | **Ambiguous sends** | Reported `UNKNOWN`, never "rejected" — then halt and reconcile |
 | **Kill switch** | Cancels resting orders *then* flattens, in that order |
 | **In-flight dedupe** | One order per symbol; a signal cannot become a double position |
+| **Stale book** | Refuses to price passively against a book older than 10s |
+| **Decision timeout** | A wedged decision halts rather than freezing the bot in position |
 
 Credentials are read from the environment only, never accepted as arguments and
 never written to disk.
@@ -179,13 +208,17 @@ and retry, and the entire `LiveBroker` path — has been written and reviewed bu
 never exercised against a real exchange. Treat first live contact as untested
 code.
 
-**No market-data stream is wired up.** `LiveEngine` exposes `on_tick()` and
-`on_book()` and is driven by whatever feeds them; a `ccxt.pro` WebSocket driver
-is not yet written.
+**Timeframe matters more than it looks.** On 1-minute bars a crypto pair
+annualises to ~135% volatility, so the default 20% vol target yields a position
+scalar of ~0.15 — positions too small to clear the minimum trade size, and the
+bot correctly declines to trade at all. That is the system telling you its edge
+is not at that frequency. Either raise `target_annual_vol` deliberately, or use
+longer bars. Do not "fix" it by lowering the cost gate.
 
-Before any real capital: run in `paper` against live data for long enough to
-confirm fill rates resemble the paper model's, and verify the kill switch
-actually flattens on a venue.
+Before any real capital: run in `paper` against live data long enough to confirm
+real fill rates resemble the paper model's (post-only fill assumptions are the
+most likely thing to be wrong), and verify the kill switch actually flattens on
+a venue rather than only in simulation.
 
 ## Setup
 

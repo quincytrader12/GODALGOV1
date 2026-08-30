@@ -71,6 +71,14 @@ class LiveEngineConfig:
     regime_refit_every: int = 24
     max_history_bars: int = 2000
 
+    max_book_age: float = 10.0
+    """Seconds before a top-of-book snapshot is too old to price against.
+
+    A trade stream can keep flowing while the book stream dies. Pricing a
+    passive order off a stale book posts into a market that has moved, which is
+    adverse selection paid for voluntarily.
+    """
+
     max_data_staleness: float = 180.0
     """Seconds without a completed bar before the bot flattens.
 
@@ -192,21 +200,39 @@ class LiveEngine:
         """Record the latest top of book. Required before any order is priced."""
         self._book = book
 
+    def ingest_tick(
+        self, price: float, size: float = 0.0, moment: datetime | None = None
+    ) -> bool:
+        """Aggregate a trade. Returns True when a bar has just completed.
+
+        Synchronous and cheap by design. A network read loop calls this on every
+        trade, so it must never block: the expensive part (regime fitting, order
+        routing) is a separate step a driver can run on its own task. Doing the
+        decision inline here would stall the socket read and drop ticks under
+        load -- exactly when the market is moving.
+        """
+        completed = self.bars.on_tick(price, size, moment)
+        if completed is None:
+            return False
+        self.state.bars_seen += 1
+        self.state.last_bar_at = datetime.now(UTC)
+        return True
+
     async def on_tick(
         self, price: float, size: float = 0.0, moment: datetime | None = None
     ) -> RoutingDecision | None:
-        """Feed a trade.
+        """Feed a trade and decide inline.
+
+        Convenience for tests and single-threaded use. Live drivers should call
+        ``ingest_tick`` and ``on_bar_close`` separately so a slow decision cannot
+        stall market-data ingestion.
 
         Returns a decision only on a completed bar. The forming bar never
         triggers a decision -- acting on it would mean trading a close that does
         not exist yet, which is precisely the lookahead the backtest forbids.
         """
-        completed = self.bars.on_tick(price, size, moment)
-        if completed is None:
+        if not self.ingest_tick(price, size, moment):
             return None
-
-        self.state.bars_seen += 1
-        self.state.last_bar_at = datetime.now(UTC)
         return await self.on_bar_close()
 
     # -- the decision -----------------------------------------------------
@@ -329,6 +355,15 @@ class LiveEngine:
     async def _route(self, target: float, equity: float, edge_bps: float) -> RoutingDecision | None:
         if self._book is None:
             logger.warning("no book snapshot; cannot price an order")
+            return None
+
+        book_age = (datetime.now(UTC) - self._book.timestamp).total_seconds()
+        if book_age > self.config.max_book_age:
+            logger.warning(
+                "book is %.1fs old (max %.1fs); standing down rather than "
+                "pricing against stale liquidity", book_age, self.config.max_book_age
+            )
+            self.state.orders_refused += 1
             return None
 
         position = await self.broker.position(self.config.symbol)

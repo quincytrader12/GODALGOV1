@@ -13,6 +13,7 @@ when the agent runtime drives the same functions directly.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -29,10 +30,41 @@ DEFAULT_CACHE = Path("data/cache")
 DEFAULT_LEDGER = Path("data/promotion_ledger.jsonl")
 
 
+class DataUnavailable(RuntimeError):
+    """Raised when market data could not be fetched, with an actionable message."""
+
+
 def _load_bars(args: argparse.Namespace):
+    """Fetch history, converting network failures into a clear message.
+
+    Reachability is the single most common failure here -- a blocked egress, a
+    geo-restricted venue, a wrong symbol -- and a raw ccxt traceback tells the
+    user nothing about which of those it was.
+    """
+    import ccxt
+
     feed = OHLCVFeed(exchange_id=args.exchange, cache_dir=DEFAULT_CACHE)
     print(f"fetching {args.symbol} {args.timeframe} from {args.exchange} ...", file=sys.stderr)
-    bars = feed.fetch(args.symbol, args.timeframe, limit=args.limit)
+    try:
+        bars = feed.fetch(args.symbol, args.timeframe, limit=args.limit)
+    except ccxt.BadSymbol as exc:
+        raise DataUnavailable(
+            f"{args.exchange} does not list {args.symbol!r}: {exc}"
+        ) from exc
+    except ccxt.NetworkError as exc:
+        raise DataUnavailable(
+            f"could not reach {args.exchange}: {exc}\n"
+            f"  - check outbound network access to the exchange API\n"
+            f"  - some venues are geo-restricted; try --exchange kraken\n"
+            f"  - cached data is used when available (see {DEFAULT_CACHE})"
+        ) from exc
+    except ccxt.BaseError as exc:
+        raise DataUnavailable(f"{args.exchange} rejected the request: {exc}") from exc
+
+    if bars.empty:
+        raise DataUnavailable(
+            f"{args.exchange} returned no bars for {args.symbol} {args.timeframe}"
+        )
     print(f"  {len(bars)} bars  {bars.index[0]} -> {bars.index[-1]}", file=sys.stderr)
     return bars
 
@@ -122,9 +154,8 @@ def cmd_live(args: argparse.Namespace) -> int:
     Defaults to dry run. Paper and live are opt-in, and live additionally
     requires the arming environment variable that ``LiveBroker`` checks.
     """
-    import asyncio
-
     from godalgo.execution.broker import DryRunBroker, PaperBroker
+    from godalgo.execution.driver import DriverConfig, WebSocketDriver
     from godalgo.execution.engine import LiveEngine, LiveEngineConfig
     from godalgo.execution.types import TradingMode
     from godalgo.features.session import SessionConfig
@@ -153,22 +184,49 @@ def cmd_live(args: argparse.Namespace) -> int:
     engine = LiveEngine(broker, MomentumStrategy(), MeanReversionStrategy(), config)
     engine.seed_history(bars)
 
+    driver = WebSocketDriver(
+        engine,
+        DriverConfig(
+            exchange_id=args.exchange,
+            max_reconnect_attempts=args.max_reconnects,
+        ),
+    )
+
     print(
         f"engine ready: {args.symbol} {args.bar_seconds}s bars, mode={mode.value}, "
         f"{engine.bars.n_complete} bars seeded (warm-up {engine._warmup})",
         file=sys.stderr,
     )
-    print(
-        "no live market-data stream is wired up yet -- feed ticks via "
-        "LiveEngine.on_tick()/on_book(). See README.",
-        file=sys.stderr,
-    )
-    asyncio.run(_report(engine))
+    if engine.bars.n_complete <= engine._warmup:
+        print(
+            f"warning: seeded {engine.bars.n_complete} bars but warm-up needs "
+            f"{engine._warmup}; the bot will not signal until it has caught up. "
+            f"Raise --limit.",
+            file=sys.stderr,
+        )
+
+    try:
+        asyncio.run(_run_driver(driver))
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+
+    print(f"stats:  {driver.stats.snapshot()}")
+    print(f"engine: {engine.state.snapshot()}")
     return 0
 
 
-async def _report(engine) -> None:
-    print(f"state: {engine.state.snapshot()}")
+async def _run_driver(driver) -> None:
+    """Run the driver, converting Ctrl-C into a graceful stop.
+
+    A hard kill would leave the position open; ``stop`` routes through the
+    engine's halt, which cancels resting orders and flattens first.
+    """
+    task = asyncio.create_task(driver.run())
+    try:
+        await task
+    except asyncio.CancelledError:
+        await driver.stop()
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -213,6 +271,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--session-tilt", type=float, default=0.0,
         help="session/overnight drift overlay weight in [0,1]; 0 disables",
     )
+    p_live.add_argument(
+        "--max-reconnects", type=int, default=0,
+        help="0 retries forever; a positive value halts once exhausted",
+    )
     p_live.set_defaults(func=cmd_live)
 
     p_led = sub.add_parser("ledger", help="show promotion history")
@@ -228,7 +290,11 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    return args.func(args)
+    try:
+        return args.func(args)
+    except DataUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
