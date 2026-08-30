@@ -1,0 +1,170 @@
+# Builds the GODALGO terminal executable for Windows, macOS and Linux.
+#
+# PyInstaller does not cross-compile: a binary must be produced on the OS it
+# will run on. That is the whole reason this workflow exists -- a Windows .exe
+# cannot be built from a Linux machine, so CI builds each target on its own
+# runner.
+#
+# Push a tag (v0.1.0) to publish a release with all three attached; run it
+# manually from the Actions tab to get artifacts without cutting a release.
+
+name: build terminal
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "build-exe.py"
+      - "run-terminal.py"
+      - "src/godalgo/ui/**"
+      - ".github/workflows/build-terminal.yml"
+
+permissions:
+  contents: write        # required only by the release job
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # a Windows failure must not cancel a working macOS build
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            binary: godalgo-terminal.exe
+          - os: macos-latest
+            label: macos-arm64
+            binary: godalgo-terminal
+          - os: ubuntu-latest
+            label: linux-x64
+            binary: godalgo-terminal
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The prime-agent submodule is 24MB and no part of the terminal, so
+          # it is not fetched. Skipping it takes minutes off every build.
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv sync
+          uv pip install pyinstaller
+
+      - name: Run tests
+        # Shipping a binary built from a red tree is worse than shipping none.
+        run: uv run pytest tests/ -q
+
+      - name: Build executable
+        run: uv run python build-exe.py
+
+      - name: Verify the binary actually serves the UI
+        # The build succeeding proves nothing: the classic PyInstaller failure
+        # here is a binary that starts, serves the API, and 404s its own page
+        # because the static files were not bundled. Only a request catches it.
+        shell: bash
+        run: |
+          ./dist/${{ matrix.binary }} --demo --no-browser --port 8899 &
+          PID=$!
+          for i in $(seq 1 40); do
+            sleep 2
+            if curl -fsS "http://127.0.0.1:8899/api/state" >/dev/null 2>&1; then
+              break
+            fi
+          done
+          FAILED=0
+          for path in "/" "/static/app.js" "/static/style.css" "/api/state"; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8899${path}" || echo 000)
+            echo "  ${path} -> ${CODE}"
+            [ "$CODE" = "200" ] || FAILED=1
+          done
+          kill $PID 2>/dev/null || true
+          if [ "$FAILED" != "0" ]; then
+            echo "::error::the built binary did not serve every required route"
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: godalgo-terminal-${{ matrix.label }}
+          path: dist/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Name the binaries by platform
+        # Every artifact is called godalgo-terminal(.exe); flattened into one
+        # release they would collide and only the last would survive.
+        run: |
+          mkdir -p release
+          cp artifacts/godalgo-terminal-windows-x64/godalgo-terminal.exe \
+             release/godalgo-terminal-windows-x64.exe
+          cp artifacts/godalgo-terminal-macos-arm64/godalgo-terminal \
+             release/godalgo-terminal-macos-arm64
+          cp artifacts/godalgo-terminal-linux-x64/godalgo-terminal \
+             release/godalgo-terminal-linux-x64
+          ls -lh release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            ## GODALGO terminal
+
+            Download the build for your platform, then run it:
+
+            | Platform | File |
+            |---|---|
+            | Windows | `godalgo-terminal-windows-x64.exe` |
+            | macOS (Apple silicon) | `godalgo-terminal-macos-arm64` |
+            | Linux | `godalgo-terminal-linux-x64` |
+
+            ```
+            godalgo-terminal-windows-x64.exe --demo    # fabricated data, nothing traded
+            godalgo-terminal-windows-x64.exe           # attached to a real session
+            ```
+
+            Opens at http://127.0.0.1:8787 — loopback only, because the process
+            holds exchange credentials and has no authentication.
+
+            **macOS and Linux:** `chmod +x` the file first. macOS will also need
+            `xattr -d com.apple.quarantine <file>` since the build is unsigned.
+
+            **Windows SmartScreen** will warn on an unsigned binary. That is
+            expected for an unsigned PyInstaller build, not a sign of tampering.
+
+            ### Connecting an exchange
+
+            Keys go in the Connections panel and are stored at
+            `~/.godalgo/credentials.json` with owner-only permissions. They are
+            never returned to the browser. A stored key cannot place orders
+            until you tick "allow this key to place orders", and LIVE mode
+            additionally requires `GODALGO_ARM_LIVE` and credentials in the
+            environment plus a typed confirmation.
+
+            Run `preflight` and `feasibility` before arming anything, and stay
+            in paper long enough to compare real fill rates against the paper
+            model.
