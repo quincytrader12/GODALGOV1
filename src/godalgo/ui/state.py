@@ -229,9 +229,23 @@ class PositionTracker:
         if position is not None and price > 0:
             position.mark_price = price
 
-    def neurons(self) -> list[Neuron]:
-        """Every position, open first, newest closed next."""
-        return list(self.open_positions.values()) + list(reversed(self.closed_positions))
+    def neurons(self, limit: int | None = None) -> list[Neuron]:
+        """Positions to render: every open one, then the newest closed.
+
+        Open positions are never dropped -- those are live risk, and a display
+        that silently omits one is worse than no display. The limit only trims
+        closed history, and the caller is told the true total so the cap is
+        visible rather than a silent truncation.
+        """
+        live = list(self.open_positions.values())
+        history = list(reversed(self.closed_positions))
+        if limit is None:
+            return live + history
+        return live + history[: max(0, limit - len(live))]
+
+    @property
+    def total_tracked(self) -> int:
+        return len(self.open_positions) + len(self.closed_positions)
 
     @property
     def realised_total(self) -> float:
@@ -370,6 +384,8 @@ class UISnapshot:
     closed_count: int
     mode: str
     symbol: str
+    rendered_count: int = 0
+    total_count: int = 0
     regime: str = "indeterminate"
     conviction: float = 0.0
     target_weight: float = 0.0
@@ -396,6 +412,8 @@ class UISnapshot:
                 "profit_factor": None if pf == float("inf") else round(pf, 3),
                 "open_count": self.open_count,
                 "closed_count": self.closed_count,
+                "rendered_count": self.rendered_count,
+                "total_count": self.total_count,
             },
             "brain": {
                 "mode": self.mode,

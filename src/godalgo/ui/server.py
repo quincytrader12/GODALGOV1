@@ -66,6 +66,15 @@ class UIBridge:
     target_weight: float = 0.0
     current_weight: float = 0.0
 
+    max_neurons: int = 140
+    """Cap on rendered positions.
+
+    The cluster runs physics and a render pass per position every frame; an
+    unbounded session would eventually make the panel unusable. Open positions
+    are never trimmed, and the true total is reported so the cap is visible.
+    The journal keeps the complete record regardless.
+    """
+
     connected: bool = False
     last_data_at: datetime | None = None
     halted: bool = False
@@ -111,7 +120,7 @@ class UIBridge:
     def snapshot(self) -> UISnapshot:
         return UISnapshot(
             timestamp=datetime.now(UTC),
-            neurons=self.tracker.neurons(),
+            neurons=self.tracker.neurons(limit=self.max_neurons),
             health=self.health(),
             equity=self.equity,
             starting_equity=self.starting_equity,
@@ -121,6 +130,8 @@ class UIBridge:
             profit_factor=self.tracker.profit_factor,
             open_count=len(self.tracker.open_positions),
             closed_count=len(self.tracker.closed_positions),
+            rendered_count=len(self.tracker.neurons(limit=self.max_neurons)),
+            total_count=self.tracker.total_tracked,
             mode=self.mode,
             symbol=self.symbol,
             regime=self.regime,
