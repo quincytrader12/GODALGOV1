@@ -49,7 +49,7 @@ python -m godalgo backtest --symbol BTC/USDT --timeframe 1h --limit 8000
 python -m godalgo evolve   --symbol BTC/USDT --candidates 16
 python -m godalgo live     --symbol BTC/USDT --bar-seconds 60   # dry run by default
 python -m godalgo ledger
-pytest                     # 268 tests
+pytest                     # 279 tests
 ```
 
 ## What frequency can it trade?
@@ -164,8 +164,13 @@ The bot scans a universe, trades what qualifies, sizes off buying power, and
 retunes itself — all without manual input.
 
 ```bash
-python -m godalgo scan --timeframe 1h --top 25
+python -m godalgo scan --timeframe 1h --top 25          # rank a universe
+python -m godalgo live --scan --max-symbols 4           # trade what qualifies
 ```
+
+`--scan` runs the fleet: the supervisor ranks the universe, starts a driver per
+selected symbol, and rotates as conditions change. Without it `live` trades the
+single `--symbol` you name.
 
 ### What the scanner rejects, and why that is the point
 
@@ -188,6 +193,21 @@ The correlation pass is not optional in crypto. On a test universe of BTC/ETH/SO
 clones the scanner selected **one** and rejected the other two as *"correlated
 with a selection"*. Without it you hold one bet three times while believing you
 are diversified.
+
+### The fleet
+
+`PortfolioDriver` runs one engine and one driver **per symbol**, sharing a
+single exchange connection. Each engine stays single-symbol and knows nothing
+about the others; everything portfolio-wide reaches it through two hooks the
+supervisor owns — a target clamp and a buying-power source. Rewriting one engine
+to hold N symbols would have meant re-deriving per-symbol state throughout, and
+every existing test of the single-symbol path would have stopped covering what
+actually runs.
+
+Starting drivers is the easy half. **Stopping one that still holds a position is
+where a multi-symbol bot goes wrong**: cancel the task and the position is left
+open with nothing managing its stop. So retirement flattens first, and a failed
+flatten *keeps the driver running* rather than orphaning the position.
 
 ### Portfolio supervision
 
@@ -393,6 +413,7 @@ own stop-loss does not have a stop-loss.**
 | `data/stream.py` | Tick → bar aggregation on wall-clock boundaries |
 | `data/scanner.py` | Universe ranking: liquidity, feasibility, correlation |
 | `portfolio/supervisor.py` | Multi-symbol exposure, buying power, rotation |
+| `execution/portfolio_driver.py` | Runs one driver per symbol; rotates the fleet |
 | `risk/stops.py` | Initial, break-even and trailing stops — ratcheted |
 | `evolve/autopilot.py` | Retunes itself while trading, behind the gate |
 | `backtest/` | Engine with costs; metrics incl. deflated Sharpe and PBO |
@@ -403,10 +424,6 @@ own stop-loss does not have a stop-loss.**
 112 tests. Backtest, evolution, and execution paths are implemented and tested,
 including order construction, the economic gate, paper fill semantics, arming
 refusal, and the session estimator's negative case.
-
-**Multi-symbol trading is built but not yet driven end-to-end.** The scanner and
-supervisor are implemented and tested, but `godalgo live` still runs a single
-engine — wiring the supervisor into the CLI loop is the remaining step.
 
 **Not verified against a live venue.** This development sandbox blocks exchange
 APIs at the proxy, so everything network-facing — the OHLCV feed's pagination

@@ -4,6 +4,7 @@
     python -m godalgo evolve   --symbol BTC/USDT --candidates 16
     python -m godalgo ledger
     python -m godalgo live      --symbol BTC/USDT --bar-seconds 60 --mode paper
+    python -m godalgo live      --scan --max-symbols 4 --mode paper
     python -m godalgo feasibility --symbol BTC/USDT --timeframe 1h
     python -m godalgo preflight   --symbol BTC/USDT
     python -m godalgo ui          --demo
@@ -275,12 +276,107 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return asyncio.run(run())
 
 
+def _build_broker(args: argparse.Namespace):
+    """Construct the broker for the requested mode, or None if refused."""
+    from godalgo.execution.broker import DryRunBroker, PaperBroker
+    from godalgo.execution.types import TradingMode
+
+    mode = TradingMode(args.mode)
+    if mode is TradingMode.LIVE:
+        from godalgo.execution.live import ArmingError, LiveBroker
+
+        try:
+            return LiveBroker(arm=True), mode
+        except ArmingError as exc:
+            print(f"refusing to start live: {exc}", file=sys.stderr)
+            return None, mode
+    if mode is TradingMode.PAPER:
+        return PaperBroker(starting_equity=args.equity), mode
+    return DryRunBroker(starting_equity=args.equity), mode
+
+
+def cmd_live_fleet(args: argparse.Namespace) -> int:
+    """Run the scanner-driven fleet: rank a universe and trade what qualifies."""
+    from godalgo.data.feed import OHLCVFeed, bars_per_day
+    from godalgo.data.scanner import MarketScanner, ScanCriteria
+    from godalgo.execution.broker import FeeSchedule
+    from godalgo.execution.engine import LiveEngine, LiveEngineConfig
+    from godalgo.execution.portfolio_driver import PortfolioDriver, PortfolioDriverConfig
+    from godalgo.portfolio.supervisor import PortfolioSupervisor, SupervisorConfig
+
+    broker, mode = _build_broker(args)
+    if broker is None:
+        return 2
+
+    feed = OHLCVFeed(exchange_id=args.exchange, cache_dir=DEFAULT_CACHE)
+    universe = [s.strip() for s in args.universe.split(",") if s.strip()]
+
+    import ccxt
+
+    print(f"loading history for {len(universe)} symbols ...", file=sys.stderr)
+    history: dict = {}
+    for symbol in universe:
+        try:
+            history[symbol] = feed.fetch(symbol, args.timeframe, limit=args.limit)
+        except (ccxt.BaseError, ValueError) as exc:
+            # One unlistable or unreachable symbol must not sink the whole
+            # universe; the scanner simply has one fewer candidate.
+            print(f"  skipped {symbol}: {exc}", file=sys.stderr)
+    if not history:
+        raise DataUnavailable("no history could be loaded for any symbol")
+
+    scanner = MarketScanner(
+        criteria=ScanCriteria(max_candidates=args.max_symbols),
+        fees=FeeSchedule(),
+        bars_per_day=bars_per_day(args.timeframe),
+        holding_bars=MomentumStrategy().expected_holding_bars,
+    )
+
+    def make_engine(symbol: str) -> LiveEngine:
+        config = LiveEngineConfig(
+            symbol=symbol, bar_seconds=args.bar_seconds, mode=mode,
+        )
+        return LiveEngine(broker, MomentumStrategy(), MeanReversionStrategy(), config)
+
+    supervisor = PortfolioSupervisor(
+        SupervisorConfig(
+            max_concurrent=args.max_symbols,
+            max_gross_exposure=args.max_gross,
+        ),
+        scanner,
+        history=lambda: history,
+        tickers=dict,
+        make_engine=make_engine,
+        equity=lambda: args.equity,
+    )
+
+    driver = PortfolioDriver(
+        supervisor,
+        PortfolioDriverConfig(exchange_id=args.exchange),
+        seed_history=lambda symbol, n: history.get(symbol),
+    )
+
+    print(
+        f"fleet: up to {args.max_symbols} symbols, gross cap {args.max_gross:.2f}, "
+        f"mode={mode.value}",
+        file=sys.stderr,
+    )
+    try:
+        asyncio.run(driver.run())
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+    print(f"fleet: {driver.snapshot()['fleet']}")
+    return 0
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run the autonomous loop.
 
     Defaults to dry run. Paper and live are opt-in, and live additionally
     requires the arming environment variable that ``LiveBroker`` checks.
     """
+    if args.scan:
+        return cmd_live_fleet(args)
     from godalgo.execution.broker import DryRunBroker, PaperBroker
     from godalgo.execution.driver import DriverConfig, WebSocketDriver
     from godalgo.execution.engine import LiveEngine, LiveEngineConfig
@@ -434,6 +530,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-reconnects", type=int, default=0,
         help="0 retries forever; a positive value halts once exhausted",
     )
+    p_live.add_argument(
+        "--scan", action="store_true",
+        help="trade a scanner-selected universe instead of one symbol",
+    )
+    p_live.add_argument(
+        "--universe",
+        default="BTC/USDT,ETH/USDT,SOL/USDT,AVAX/USDT,LINK/USDT,MATIC/USDT,DOT/USDT,ADA/USDT",
+        help="candidate symbols the scanner ranks (--scan only)",
+    )
+    p_live.add_argument("--max-symbols", type=int, default=4)
+    p_live.add_argument("--max-gross", type=float, default=1.0,
+                        help="cap on summed absolute exposure across all symbols")
     p_live.set_defaults(func=cmd_live)
 
     p_feas = sub.add_parser(

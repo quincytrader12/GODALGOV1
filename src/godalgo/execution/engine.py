@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -188,6 +189,19 @@ class LiveEngine:
         self._session: SessionProfile | None = None
         self._session_fitted_at_bar = -1
 
+        self.target_clamp: Callable[[str, float], float] | None = None
+        """Optional portfolio-level clamp, set by a supervisor.
+
+        Applied *after* the risk layer, and only ever to reduce. The engine
+        knows nothing about other symbols, so anything portfolio-wide -- gross
+        exposure across the book, buying power shared between engines -- has to
+        arrive through this hook rather than be inferred here.
+        """
+
+        self.buying_power: Callable[[str], float] | None = None
+        """Optional buying-power source. Without it the engine sizes against
+        full equity, which is correct alone and wrong in a fleet."""
+
         if self.config.mode is TradingMode.LIVE:
             logger.warning(
                 "LiveEngine starting in LIVE mode on %s -- real orders", self.config.symbol
@@ -267,13 +281,26 @@ class LiveEngine:
 
         target, edge_bps = self._compute_target(frame)
         decision = self.risk.apply(target)
-        self.state.target_weight = decision.weight
+        weight = decision.weight
+
+        # Portfolio clamp last, so a fleet-wide limit can only tighten what the
+        # per-symbol risk layer already allowed, never loosen it.
+        if self.target_clamp is not None:
+            clamped = self.target_clamp(self.config.symbol, weight)
+            if abs(clamped) < abs(weight):
+                logger.info(
+                    "portfolio clamped %s target %.4f -> %.4f",
+                    self.config.symbol, weight, clamped,
+                )
+            weight = clamped
+
+        self.state.target_weight = weight
 
         if decision.was_reduced:
             logger.info("risk reduced target %.4f -> %.4f (%s)",
                         decision.requested, decision.weight, ",".join(decision.binding))
 
-        return await self._route(decision.weight, equity, edge_bps)
+        return await self._route(weight, equity, edge_bps)
 
     def _compute_target(self, frame: pd.DataFrame) -> tuple[float, float]:
         """Target weight and expected edge, from the same pipeline as backtest.
@@ -386,11 +413,19 @@ class LiveEngine:
         mark = self._book.mid
         self.state.current_weight = (position.quantity * mark / equity) if equity > 0 else 0.0
 
+        # In a fleet each engine gets a share, not the whole account. Sizing
+        # against full equity would have every engine believe it owns all of it.
+        sizing_equity = equity
+        if self.buying_power is not None:
+            allocated = self.buying_power(self.config.symbol)
+            if allocated > 0:
+                sizing_equity = min(equity, allocated)
+
         decision = self.router.decide(
             symbol=self.config.symbol,
             target_weight=target,
             current_weight=self.state.current_weight,
-            equity=equity,
+            equity=sizing_equity,
             book=self._book,
             expected_edge_bps=edge_bps,
         )
