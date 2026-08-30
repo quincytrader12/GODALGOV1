@@ -107,7 +107,33 @@ python -m godalgo ui --demo      # fabricated positions, nothing traded
 python run-terminal.py --demo    # double-clickable launcher
 ```
 
-### Building the executable
+### Download a prebuilt executable
+
+Builds for Windows, macOS and Linux are produced by CI on real runners for each
+platform — PyInstaller does not cross-compile, so a Windows `.exe` cannot be
+made on a Linux machine.
+
+| Get it from | How |
+|---|---|
+| **Releases** | Push a tag: `git tag v0.1.0 && git push origin v0.1.0` |
+| **Actions artifacts** | Run *build terminal* from the Actions tab, then download from the run |
+
+```
+godalgo-terminal-windows-x64.exe --demo    # fabricated data, nothing traded
+godalgo-terminal-windows-x64.exe           # attached to a real session
+```
+
+Both binaries are **unsigned**, so expect a warning on first run: Windows
+SmartScreen ("More info" → "Run anyway") and, on macOS, `xattr -d
+com.apple.quarantine <file>` plus `chmod +x`. That is normal for an unsigned
+PyInstaller build.
+
+Every CI build runs the full test suite first and is then smoke-tested by
+starting the binary and requesting the page, its JS, its CSS and the API — the
+build succeeding proves nothing on its own, since the classic PyInstaller
+failure is a binary that starts, serves the API, and 404s its own page.
+
+### Building the executable yourself
 
 ```bash
 pip install pyinstaller
