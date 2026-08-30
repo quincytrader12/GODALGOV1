@@ -1,0 +1,343 @@
+/* GODALGO terminal.
+   Layout is a fixed 4-row grid: nothing is free-floating, so no panel can
+   collapse and leave a gap. The cluster takes all remaining height (1fr);
+   every other row is sized to its content. */
+
+:root {
+  --bg:            #05070c;
+  --bg-panel:      #0a0e16;
+  --bg-raised:     #0e1421;
+  --grid:          #101827;
+  --line:          #1b2537;
+
+  --amber:         #ff8c1a;   /* neurons */
+  --amber-dim:     #a35a10;
+  --cyan:          #35d6f0;   /* chrome */
+  --cyan-dim:      #1a6b7a;
+  --green:         #22e08a;   /* profit */
+  --red:           #ff3b47;   /* loss */
+  --laser:         #ff2740;   /* health beam */
+
+  --text:          #c8d6e8;
+  --text-dim:      #6a7b93;
+  --text-bright:   #eaf2ff;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --rail: 340px;
+  --gap: 1px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- shell ---------- */
+
+#shell {
+  display: grid;
+  grid-template-columns: 1fr var(--rail);
+  grid-template-rows: 34px 1fr 58px 210px;
+  grid-template-areas:
+    "header  rail"
+    "cluster rail"
+    "laser   rail"
+    "bottom  rail";
+  height: 100vh;
+  gap: var(--gap);
+  background: var(--line);
+}
+
+.panel {
+  background: var(--bg-panel);
+  position: relative;
+  overflow: hidden;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--bg-raised), transparent);
+  flex: 0 0 auto;
+}
+.panel-title .spacer { flex: 1; }
+.panel-title .meta { color: var(--text-dim); letter-spacing: 0.08em; }
+
+/* ---------- header ---------- */
+
+#header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 14px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  color: var(--amber);
+  text-shadow: 0 0 12px rgba(255, 140, 26, 0.5);
+}
+
+.stat { display: flex; gap: 6px; align-items: baseline; white-space: nowrap; }
+.stat .k { color: var(--text-dim); font-size: 9.5px; letter-spacing: 0.1em; }
+.stat .v { color: var(--text-bright); font-variant-numeric: tabular-nums; }
+.stat .v.pos { color: var(--green); }
+.stat .v.neg { color: var(--red); }
+
+#header .spacer { flex: 1; }
+
+.mode-pill {
+  padding: 3px 9px;
+  border: 1px solid var(--cyan-dim);
+  border-radius: 2px;
+  color: var(--cyan);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+}
+.mode-pill.live { border-color: var(--red); color: var(--red); animation: pulse 1.6s infinite; }
+
+@keyframes pulse { 50% { opacity: 0.45; } }
+
+/* ---------- cluster ---------- */
+
+#cluster {
+  grid-area: cluster;
+  display: flex;
+  flex-direction: column;
+}
+/* min-height: 0 is load-bearing. A flex item defaults to min-height: auto and
+   will not shrink below its intrinsic size; for a canvas that is its height
+   attribute, which resize() sets from the measured height -- so without this
+   the element ratchets larger every resize, overflows the panel, and gets
+   clipped by overflow: hidden while the physics still believes it has the
+   full height. Neurons then settle into an invisible strip. */
+#cluster-canvas { flex: 1; min-height: 0; display: block; width: 100%; cursor: crosshair; }
+
+.legend {
+  position: absolute;
+  left: 12px; bottom: 8px;
+  padding: 3px 8px;
+  background: rgba(5, 7, 12, 0.78);
+  border-radius: 3px;
+  display: flex; gap: 14px;
+  pointer-events: none;
+  font-size: 9.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+}
+.legend i {
+  display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; margin-right: 5px; vertical-align: middle;
+}
+.legend .o { background: var(--amber); box-shadow: 0 0 7px var(--amber); }
+.legend .g { background: var(--green); box-shadow: 0 0 7px var(--green); }
+.legend .r { background: var(--red);   box-shadow: 0 0 7px var(--red); }
+
+.empty-hint {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim); letter-spacing: 0.14em; font-size: 10px;
+  pointer-events: none; text-align: center; line-height: 2;
+}
+
+/* ---------- laser ---------- */
+
+#laser { grid-area: laser; display: flex; flex-direction: column; }
+
+.laser-body { flex: 1; display: flex; align-items: center; gap: 12px; padding: 0 14px; }
+
+.laser-track {
+  position: relative;
+  flex: 1;
+  height: 3px;
+  background: #1a0508;
+  border-radius: 2px;
+  overflow: visible;
+}
+.laser-fill {
+  position: absolute; inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #7a0d18, var(--laser));
+  box-shadow: 0 0 10px var(--laser), 0 0 26px rgba(255, 39, 64, 0.55);
+  transition: width 0.5s ease;
+}
+.laser-head {
+  position: absolute; top: 50%;
+  width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 9px #fff, 0 0 20px var(--laser), 0 0 34px var(--laser);
+  transition: left 0.5s ease;
+}
+.laser-scan {
+  position: absolute; top: -7px; bottom: -7px; width: 2px;
+  background: linear-gradient(180deg, transparent, rgba(255,255,255,0.8), transparent);
+  opacity: 0.65;
+  animation: sweep 3.4s linear infinite;
+}
+@keyframes sweep { from { left: 0; } to { left: 100%; } }
+
+.laser-readout { display: flex; gap: 16px; align-items: baseline; white-space: nowrap; }
+.laser-readout .label { font-size: 13px; letter-spacing: 0.2em; color: var(--laser); }
+.laser-readout .label.nominal { color: var(--green); }
+.laser-readout .label.degraded { color: var(--amber); }
+.laser-readout .pct { color: var(--text-bright); font-variant-numeric: tabular-nums; }
+
+/* ---------- bottom row ---------- */
+
+#bottom {
+  grid-area: bottom;
+  display: grid;
+  grid-template-columns: 400px 1fr;
+  gap: var(--gap);
+  background: var(--line);
+  min-height: 0;
+}
+
+#pnl, #journal { display: flex; flex-direction: column; min-height: 0; }
+
+.pnl-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--line);
+  flex: 0 0 auto;
+}
+.cell { background: var(--bg-panel); padding: 9px 11px; }
+.cell .k { font-size: 8.5px; letter-spacing: 0.12em; color: var(--text-dim); text-transform: uppercase; }
+.cell .v { font-size: 15px; margin-top: 3px; color: var(--text-bright); font-variant-numeric: tabular-nums; }
+.cell .v.pos { color: var(--green); }
+.cell .v.neg { color: var(--red); }
+.cell .v.small { font-size: 12px; }
+
+#equity-spark { flex: 1; min-height: 0; width: 100%; display: block; }  /* same reason */
+
+/* ---------- scroll lists ---------- */
+
+.scroll { flex: 1; overflow-y: auto; min-height: 0; }
+.scroll::-webkit-scrollbar { width: 7px; }
+.scroll::-webkit-scrollbar-track { background: var(--bg); }
+.scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.scroll::-webkit-scrollbar-thumb:hover { background: var(--cyan-dim); }
+
+.row {
+  display: grid;
+  grid-template-columns: 62px 1fr 58px 78px;
+  gap: 8px;
+  padding: 6px 11px;
+  border-bottom: 1px solid rgba(27, 37, 55, 0.5);
+  align-items: center;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.row:hover { background: var(--bg-raised); }
+.row .t { color: var(--text-dim); font-size: 10px; }
+.row .s { color: var(--text-bright); }
+.row .side { font-size: 9.5px; letter-spacing: 0.08em; }
+.row .side.long { color: var(--cyan); }
+.row .side.short { color: var(--amber); }
+.row .p { text-align: right; font-variant-numeric: tabular-nums; }
+.row .p.pos { color: var(--green); }
+.row .p.neg { color: var(--red); }
+
+.empty { padding: 22px 12px; color: var(--text-dim); text-align: center; letter-spacing: 0.1em; font-size: 10px; }
+
+/* ---------- rail ---------- */
+
+#rail {
+  grid-area: rail;
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  gap: var(--gap);
+  background: var(--line);
+  min-height: 0;
+}
+
+#detail, #brain, #connections { display: flex; flex-direction: column; min-height: 0; }
+#detail .scroll { padding: 0; }
+
+.kv { display: grid; grid-template-columns: 96px 1fr; gap: 5px 10px; padding: 10px 12px; font-size: 11px; }
+.kv dt { color: var(--text-dim); font-size: 10px; letter-spacing: 0.06em; }
+.kv dd { color: var(--text-bright); font-variant-numeric: tabular-nums; word-break: break-all; }
+.kv dd.pos { color: var(--green); }
+.kv dd.neg { color: var(--red); }
+.kv dd.amber { color: var(--amber); }
+
+.bar { height: 3px; background: var(--grid); border-radius: 2px; overflow: hidden; margin-top: 5px; }
+.bar > i { display: block; height: 100%; background: var(--cyan); box-shadow: 0 0 7px var(--cyan); transition: width 0.4s; }
+
+/* ---------- connections ---------- */
+
+#connections { max-height: 250px; }
+.conn-list { padding: 4px 0; }
+.conn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; font-size: 10.5px;
+  border-bottom: 1px solid rgba(27, 37, 55, 0.5);
+}
+.conn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
+.conn .dot.on { background: var(--green); box-shadow: 0 0 7px var(--green); }
+.conn .name { color: var(--text-bright); flex: 1; }
+.conn .key { color: var(--text-dim); font-size: 9.5px; }
+.conn button {
+  background: none; border: 1px solid var(--line); color: var(--text-dim);
+  cursor: pointer; font-family: var(--mono); font-size: 9px; padding: 1px 6px; border-radius: 2px;
+}
+.conn button:hover { border-color: var(--red); color: var(--red); }
+
+.form { padding: 9px 12px; display: grid; gap: 6px; border-top: 1px solid var(--line); }
+.form input[type="text"], .form input[type="password"] {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text-bright);
+  font-family: var(--mono); font-size: 10.5px; padding: 5px 7px; border-radius: 2px; width: 100%;
+}
+.form input:focus { outline: none; border-color: var(--cyan-dim); }
+.form .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.form label { display: flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 9.5px; }
+.form button {
+  background: var(--bg-raised); border: 1px solid var(--cyan-dim); color: var(--cyan);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; padding: 6px;
+  cursor: pointer; border-radius: 2px; text-transform: uppercase;
+}
+.form button:hover { background: var(--cyan-dim); color: var(--bg); }
+.form button.ghost { border-color: var(--line); color: var(--text-dim); }
+.form button.ghost:hover { border-color: var(--amber-dim); color: var(--amber); background: none; }
+
+.note { color: var(--text-dim); font-size: 9px; line-height: 1.5; }
+.note.warn { color: var(--amber); }
+
+.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); }
+.tabs button {
+  flex: 1; background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-dim); font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em;
+  padding: 6px 0; cursor: pointer; text-transform: uppercase;
+}
+.tabs button.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+
+/* Screens narrower than the rail + a usable cluster stack instead of squeezing. */
+@media (max-width: 1100px) {
+  #shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: 34px 1fr 58px 210px 260px;
+    grid-template-areas: "header" "cluster" "laser" "bottom" "rail";
+  }
+  #rail { grid-template-rows: auto auto auto; }
+}

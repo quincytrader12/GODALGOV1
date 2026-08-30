@@ -97,6 +97,67 @@ Earlier this refused every trade at default settings. Two causes, both fixed:
 At default settings the same run now sends 8 orders / 9 fills instead of zero,
 while still refusing 17 of 25 decisions — selective, not permissive.
 
+## Terminal UI
+
+A local, single-page terminal — the bot's decision state rendered as a neural
+cluster. Run it with:
+
+```bash
+python -m godalgo ui --demo      # fabricated positions, nothing traded
+python run-terminal.py --demo    # double-clickable launcher
+```
+
+Build a standalone executable:
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --name godalgo-terminal \
+    --add-data "src/godalgo/ui/static:godalgo/ui/static" run-terminal.py
+```
+
+The `--add-data` mapping is required — without it the executable runs, serves
+the API, and 404s on the page itself.
+
+### What it shows
+
+| Panel | Content |
+|---|---|
+| **Neural cluster** | Every position as a floating neuron. **Orange** = open, **green** = closed in profit, **red** = closed at a loss. Size scales with notional (square-root, so one large trade doesn't swallow the panel). Synapses link nearby positions — amber for the same instrument. Click any neuron for its full record: instrument, side, open, close, mark, duration, fees, net P&L, and the strategy, regime and conviction that opened it. |
+| **Health laser** | A single 0–1 score driven by connection, data staleness, halt state, reconnects, errors and drawdown. Multiplicative, so one failure shows through. Stale data is weighted heaviest — it's the failure that looks most like normality. |
+| **P&L** | Net / realised / unrealised, return, win rate, profit factor, and a live equity curve. |
+| **Journal** | Every closed trade, plus completed days. Rolls over at **UTC midnight** and pushes the daily summary to Telegram. |
+| **Connections** | Add exchange API keys and check Telegram wiring. |
+
+Open positions stay **orange** rather than being coloured by running P&L — an
+open position hasn't made or lost anything yet, and colouring it by an
+unrealised number invites treating a paper gain as a result.
+
+### Telegram
+
+```bash
+export GODALGO_TELEGRAM_TOKEN="123456:AA..."
+export GODALGO_TELEGRAM_CHAT_ID="987654321"
+```
+
+The daily digest fires automatically at UTC rollover; "Send digest now" in the
+Connections panel pushes the current day on demand.
+
+### Security
+
+This process holds keys that can move money and serves HTTP with **no
+authentication**, so:
+
+| Control | Behaviour |
+|---|---|
+| **Bind address** | `127.0.0.1` only — `_assert_loopback` *rejects* `0.0.0.0` or any LAN address rather than warning about it |
+| **Key storage** | `~/.godalgo/credentials.json`, mode `0600`, created owner-only before any secret is written |
+| **Over the wire** | The API returns a masked view only (`KEY1******7890`). Secrets are never sent to the browser, in any form |
+| **Trading** | A stored key is `trade_enabled=false` unless explicitly ticked — pasting a key into a form cannot by itself authorise orders |
+| **Logs** | No key material at any level; Telegram errors log a status code, never the URL, which contains the token |
+| **The UI cannot trade** | It is a read-only view. It never places orders or mutates engine state — a UI that can trade is a second, untested path to the exchange |
+
+Secrets never leave your machine.
+
 ## Execution
 
 Event-driven and autonomous. To be clear about scope: this is **not** HFT in the
@@ -239,6 +300,8 @@ own stop-loss does not have a stop-loss.**
 | `features/session.py` | Overnight/session drift, James-Stein shrunk |
 | `risk/limits.py` | Deterministic caps and kill switch — **not tunable** |
 | `execution/` | Brokers (dry-run/paper/live), router, reconciler, live engine |
+| `ui/` | Local terminal: position tracking, journal, Telegram, credentials, server |
+| `feasibility.py` | Can this configuration trade at this frequency? |
 | `data/stream.py` | Tick → bar aggregation on wall-clock boundaries |
 | `backtest/` | Engine with costs; metrics incl. deflated Sharpe and PBO |
 | `evolve/` | Purged walk-forward, parameter search, promotion gate + ledger |

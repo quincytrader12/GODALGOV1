@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GODALGO · terminal</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%23ff8c1a'/%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%2335d6f0' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="shell">
+
+  <!-- ── header ───────────────────────────────────────────── -->
+  <div id="header">
+    <span class="brand">GODALGO</span>
+    <span class="stat"><span class="k">SYM</span><span class="v" id="h-symbol">—</span></span>
+    <span class="stat"><span class="k">REGIME</span><span class="v" id="h-regime">—</span></span>
+    <span class="stat"><span class="k">CONV</span><span class="v" id="h-conv">—</span></span>
+    <span class="stat"><span class="k">TARGET</span><span class="v" id="h-target">—</span></span>
+    <span class="stat"><span class="k">EQUITY</span><span class="v" id="h-equity">—</span></span>
+    <span class="stat"><span class="k">P&amp;L</span><span class="v" id="h-pnl">—</span></span>
+    <span class="spacer"></span>
+    <span class="stat"><span class="k">LINK</span><span class="v" id="h-link">…</span></span>
+    <span class="mode-pill" id="h-mode">—</span>
+  </div>
+
+  <!-- ── neural cluster ───────────────────────────────────── -->
+  <div id="cluster" class="panel">
+    <div class="panel-title">
+      <span>Neural cluster</span>
+      <span class="spacer"></span>
+      <span class="meta" id="c-count">0 positions</span>
+    </div>
+    <canvas id="cluster-canvas"></canvas>
+    <div class="empty-hint" id="c-empty">
+      NO POSITIONS YET<br><span style="font-size:9px">neurons appear as the bot opens trades</span>
+    </div>
+    <div class="legend">
+      <span><i class="o"></i>open</span>
+      <span><i class="g"></i>profit</span>
+      <span><i class="r"></i>loss</span>
+      <span style="opacity:.6">click a neuron for detail</span>
+    </div>
+  </div>
+
+  <!-- ── health laser ─────────────────────────────────────── -->
+  <div id="laser" class="panel">
+    <div class="panel-title">
+      <span>Terminal health</span>
+      <span class="spacer"></span>
+      <span class="meta" id="l-detail">—</span>
+    </div>
+    <div class="laser-body">
+      <div class="laser-track">
+        <div class="laser-fill" id="l-fill" style="width:0%"></div>
+        <div class="laser-head"  id="l-head" style="left:0%"></div>
+        <div class="laser-scan"></div>
+      </div>
+      <div class="laser-readout">
+        <span class="label" id="l-label">—</span>
+        <span class="pct"   id="l-pct">—</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── bottom: pnl + journal ────────────────────────────── -->
+  <div id="bottom">
+    <div id="pnl" class="panel">
+      <div class="panel-title"><span>P&amp;L</span><span class="spacer"></span>
+        <span class="meta" id="p-count">—</span></div>
+      <div class="pnl-grid">
+        <div class="cell"><div class="k">Net</div><div class="v" id="p-net">—</div></div>
+        <div class="cell"><div class="k">Realised</div><div class="v small" id="p-real">—</div></div>
+        <div class="cell"><div class="k">Unrealised</div><div class="v small" id="p-unreal">—</div></div>
+        <div class="cell"><div class="k">Return</div><div class="v small" id="p-ret">—</div></div>
+        <div class="cell"><div class="k">Win rate</div><div class="v small" id="p-win">—</div></div>
+        <div class="cell"><div class="k">Profit factor</div><div class="v small" id="p-pf">—</div></div>
+      </div>
+      <canvas id="equity-spark"></canvas>
+    </div>
+
+    <div id="journal" class="panel">
+      <div class="panel-title">
+        <span>Journal</span>
+        <span class="spacer"></span>
+        <span class="meta" id="j-tg">telegram: —</span>
+      </div>
+      <div class="tabs">
+        <button class="active" data-tab="trades">Trades</button>
+        <button data-tab="days">Daily</button>
+      </div>
+      <div class="scroll" id="j-list"><div class="empty">NO ENTRIES</div></div>
+    </div>
+  </div>
+
+  <!-- ── rail ─────────────────────────────────────────────── -->
+  <div id="rail">
+    <div id="detail" class="panel">
+      <div class="panel-title"><span>Position detail</span><span class="spacer"></span>
+        <span class="meta" id="d-id">—</span></div>
+      <div class="scroll" id="d-body">
+        <div class="empty">SELECT A NEURON</div>
+      </div>
+    </div>
+
+    <div id="brain" class="panel">
+      <div class="panel-title"><span>Decision state</span></div>
+      <dl class="kv">
+        <dt>regime</dt><dd id="b-regime" class="amber">—</dd>
+        <dt>conviction</dt><dd id="b-conv">—<div class="bar"><i id="b-conv-bar" style="width:0%"></i></div></dd>
+        <dt>target w</dt><dd id="b-target">—</dd>
+        <dt>current w</dt><dd id="b-current">—</dd>
+        <dt>decisions</dt><dd id="b-dec">—</dd>
+        <dt>data age</dt><dd id="b-age">—</dd>
+      </dl>
+    </div>
+
+    <div id="connections" class="panel">
+      <div class="panel-title"><span>Connections</span><span class="spacer"></span>
+        <span class="meta" id="k-count">0</span></div>
+      <div class="scroll">
+        <div class="conn-list" id="k-list"></div>
+        <div class="form">
+          <div class="pair">
+            <input type="text" id="k-ex"    placeholder="exchange id" autocomplete="off">
+            <input type="text" id="k-label" placeholder="label" autocomplete="off">
+          </div>
+          <input type="password" id="k-key"    placeholder="api key"    autocomplete="off">
+          <input type="password" id="k-secret" placeholder="api secret" autocomplete="off">
+          <input type="password" id="k-pass"   placeholder="passphrase (optional)" autocomplete="off">
+          <label><input type="checkbox" id="k-trade"> allow this key to place orders</label>
+          <button id="k-add">Add connection</button>
+          <button class="ghost" id="k-tg">Test telegram</button>
+          <button class="ghost" id="k-digest">Send digest now</button>
+          <p class="note">Keys are stored at <code id="k-path">~/.godalgo/credentials.json</code>
+             with owner-only permissions and are never sent back to this page.</p>
+          <p class="note warn" id="k-msg"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

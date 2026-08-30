@@ -6,6 +6,7 @@
     python -m godalgo live      --symbol BTC/USDT --bar-seconds 60 --mode paper
     python -m godalgo feasibility --symbol BTC/USDT --timeframe 1h
     python -m godalgo preflight   --symbol BTC/USDT
+    python -m godalgo ui          --demo
 
 Deliberately thin. It wires existing components together and prints results; it
 holds no strategy logic of its own, so anything that works here works identically
@@ -300,6 +301,38 @@ async def _run_driver(driver) -> None:
         raise
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Launch the local terminal.
+
+    Binds to loopback only. The process holds exchange credentials and has no
+    authentication, so it must never be reachable off this machine.
+    """
+    import threading
+
+    from godalgo.ui.server import UIBridge, run_server
+    from godalgo.ui.simulator import Simulator
+
+    bridge = UIBridge(starting_equity=args.equity, equity=args.equity, mode="dry_run")
+    bridge.symbol = args.symbol
+
+    if args.demo:
+        simulator = Simulator(bridge)
+        simulator.seed_history()
+
+        def pump() -> None:
+            asyncio.run(simulator.run())
+
+        threading.Thread(target=pump, daemon=True).start()
+        print("demo mode: positions are fabricated, not traded", file=sys.stderr)
+
+    print(f"terminal: http://{args.host}:{args.port}", file=sys.stderr)
+    try:
+        run_server(bridge, host=args.host, port=args.port, open_browser=not args.no_browser)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="godalgo", description=__doc__)
     parser.add_argument("--verbose", action="store_true")
@@ -362,6 +395,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_pre.add_argument("--symbol", default="BTC/USDT")
     p_pre.set_defaults(func=cmd_preflight)
+
+    p_ui = sub.add_parser("ui", help="launch the local terminal UI")
+    p_ui.add_argument("--symbol", default="BTC/USDT")
+    p_ui.add_argument("--host", default="127.0.0.1", help="loopback addresses only")
+    p_ui.add_argument("--port", type=int, default=8787)
+    p_ui.add_argument("--equity", type=float, default=10_000.0)
+    p_ui.add_argument("--demo", action="store_true",
+                      help="populate with fabricated positions (nothing is traded)")
+    p_ui.add_argument("--no-browser", action="store_true")
+    p_ui.set_defaults(func=cmd_ui)
 
     p_led = sub.add_parser("ledger", help="show promotion history")
     p_led.add_argument("--tail", type=int, default=20)
