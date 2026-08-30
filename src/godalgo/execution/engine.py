@@ -47,10 +47,13 @@ from godalgo.execution.types import (
     TimeInForce,
     TradingMode,
 )
+from godalgo.features.indicators import atr as compute_atr
 from godalgo.features.indicators import ewma_volatility, log_returns
 from godalgo.features.session import SessionConfig, SessionProfile, fit_session_profile
 from godalgo.portfolio.allocator import AllocationConfig, blend_signals
+from godalgo.portfolio.sizing import GrowthConfig, risk_based_size
 from godalgo.risk.limits import RiskLimits, RiskManager
+from godalgo.risk.stops import StopConfig, StopManager
 from godalgo.strategies.base import Strategy
 
 __all__ = ["EngineState", "LiveEngine", "LiveEngineConfig"]
@@ -104,6 +107,9 @@ class LiveEngineConfig:
     """
 
     allocation: AllocationConfig = field(default_factory=AllocationConfig)
+    stops: StopConfig = field(default_factory=StopConfig)
+    growth: GrowthConfig = field(default_factory=GrowthConfig)
+    atr_window: int = 14
 
     session: SessionConfig | None = None
     """Overnight/session drift overlay. ``None`` disables it."""
@@ -177,6 +183,7 @@ class LiveEngine:
         self.fees = fees or FeeSchedule()
         self.router = router or OrderRouter(RoutingConfig(), self.fees)
         self.risk = RiskManager(limits=risk_limits or RiskLimits())
+        self.stops = StopManager(self.config.stops)
         self.reconciler = Reconciler(broker)
         self.state = EngineState()
 
@@ -280,6 +287,15 @@ class LiveEngine:
             return None
 
         target, edge_bps = self._compute_target(frame)
+
+        # Per-position stop, checked before anything else. A stop that only
+        # applies when the strategy happens to agree is not a stop.
+        exit_reason = self._check_stop(frame)
+        if exit_reason is not None:
+            logger.warning("%s stop hit (%s) — exiting", self.config.symbol, exit_reason.value)
+            target = 0.0
+            edge_bps = 0.0
+
         decision = self.risk.apply(target)
         weight = decision.weight
 
@@ -351,7 +367,16 @@ class LiveEngine:
             self.config.target_annual_vol / annual_vol if annual_vol > 0 else 0.0,
             self.risk.limits.max_gross_weight,
         )
-        target = float(np.clip(conviction * vol_scalar,
+        vol_target = conviction * vol_scalar
+
+        # Risk-based cap. Volatility targeting bounds portfolio volatility;
+        # this bounds what one trade can lose. They answer different questions,
+        # so the binding one wins rather than one replacing the other.
+        risk_cap = self._risk_capped_weight(frame)
+        if risk_cap is not None:
+            vol_target = float(np.sign(vol_target)) * min(abs(vol_target), risk_cap)
+
+        target = float(np.clip(vol_target,
                                -self.risk.limits.max_gross_weight,
                                self.risk.limits.max_gross_weight))
 
@@ -394,6 +419,92 @@ class LiveEngine:
         if self._session is None:
             return None
         return self._session.tilt_series(frame.index)
+
+    def _current_atr(self, frame: pd.DataFrame) -> float | None:
+        """ATR over the recent window, or None if it cannot be computed."""
+        if not {"high", "low", "close"} <= set(frame.columns):
+            return None
+        series = compute_atr(frame["high"], frame["low"], frame["close"], self.config.atr_window)
+        if series.empty:
+            return None
+        value = float(series.iloc[-1])
+        return value if np.isfinite(value) and value > 0 else None
+
+    def _risk_capped_weight(self, frame: pd.DataFrame) -> float | None:
+        """Largest weight whose stop-out costs at most one trade's risk budget.
+
+        Derived from the stop distance rather than from notional, so the cap
+        tightens on a wide stop and loosens on a tight one -- which is what
+        makes risk-per-trade constant instead of a function of volatility.
+        """
+        atr = self._current_atr(frame)
+        if atr is None:
+            return None
+        price = float(frame["close"].iloc[-1])
+        if price <= 0:
+            return None
+
+        stop_distance = self.config.stops.initial_atr * atr
+        stop_price = price - stop_distance
+        quantity = risk_based_size(
+            self.state.equity or 1.0, price, stop_price,
+            growth=self.config.growth, drawdown=self._drawdown(),
+        )
+        if quantity <= 0:
+            return None
+        equity = self.state.equity or 1.0
+        return float(quantity * price / equity)
+
+    def _drawdown(self) -> float:
+        peak = self.risk.peak_equity
+        return max(0.0, 1.0 - self.risk.equity / peak) if peak > 0 else 0.0
+
+    def _check_stop(self, frame: pd.DataFrame) -> object | None:
+        """Advance the stop for any open position, and report an exit.
+
+        The stop is opened lazily on the first bar the engine finds itself in a
+        position, rather than at order time: a post-only entry may rest for
+        several bars, and a stop placed against an intended entry that never
+        filled would fire on a position that does not exist.
+        """
+        symbol = self.config.symbol
+        price = float(frame["close"].iloc[-1])
+        holding = abs(self.state.current_weight) > 1e-9
+
+        if not holding:
+            self.stops.close(symbol)
+            return None
+
+        atr = self._current_atr(frame)
+
+        # A tracked stop belongs to the position that was open when it was
+        # placed. If the book has since flipped direction, that stop is not
+        # merely stale -- it sits on the wrong side of the market and can never
+        # fire, leaving the new position completely unprotected. Weight does
+        # not always pass cleanly through zero between trades, so a flat check
+        # alone misses this.
+        tracked = self.stops.positions.get(symbol)
+        if tracked is not None:
+            side_now = "long" if self.state.current_weight > 0 else "short"
+            if tracked.side != side_now:
+                logger.info(
+                    "%s flipped %s -> %s; replacing its stop",
+                    symbol, tracked.side, side_now,
+                )
+                self.stops.close(symbol)
+                tracked = None
+
+        if tracked is None:
+            if atr is None:
+                # No volatility estimate means no stop can be placed in the
+                # configured units. Reported rather than silently unprotected.
+                logger.warning("%s: holding a position with no ATR; stop not placed", symbol)
+                return None
+            side = "long" if self.state.current_weight > 0 else "short"
+            self.stops.open(symbol, side, price, atr)
+            return None
+
+        return self.stops.update(symbol, price, atr)
 
     async def _route(self, target: float, equity: float, edge_bps: float) -> RoutingDecision | None:
         if self._book is None:

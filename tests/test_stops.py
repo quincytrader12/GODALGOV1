@@ -207,3 +207,94 @@ def test_conviction_scales_within_the_cap():
     full = risk_based_size(10_000, 100.0, 99.0, growth=g, conviction=1.0)
     half = risk_based_size(10_000, 100.0, 99.0, growth=g, conviction=0.5)
     assert half == pytest.approx(full * 0.5)
+
+
+# --- engine integration ----------------------------------------------------
+
+def _engine():
+    from godalgo.execution.broker import PaperBroker
+    from godalgo.execution.engine import LiveEngine, LiveEngineConfig
+    from godalgo.strategies.mean_reversion import MeanReversionStrategy
+    from godalgo.strategies.momentum import MomentumStrategy
+
+    return LiveEngine(
+        PaperBroker(starting_equity=10_000.0),
+        MomentumStrategy(), MeanReversionStrategy(),
+        LiveEngineConfig(symbol="BTC/USDT", bar_seconds=60),
+    )
+
+
+def _bars(n=400, price=100.0):
+    import numpy as np
+    import pandas as pd
+
+    idx = pd.date_range("2024-01-01", periods=n, freq="1min", tz="UTC")
+    px = np.full(n, price) + np.linspace(0, 4, n)
+    return pd.DataFrame(
+        {"open": px, "high": px * 1.004, "low": px * 0.996, "close": px, "volume": 1.0},
+        index=idx,
+    )
+
+
+def test_engine_places_a_stop_once_it_holds_a_position():
+    engine = _engine()
+    engine.state.current_weight = 0.3
+    engine._check_stop(_bars())
+    assert "BTC/USDT" in engine.stops.positions
+
+
+def test_engine_drops_the_stop_when_flat():
+    engine = _engine()
+    engine.state.current_weight = 0.3
+    engine._check_stop(_bars())
+    engine.state.current_weight = 0.0
+    engine._check_stop(_bars())
+    assert "BTC/USDT" not in engine.stops.positions
+
+
+def test_a_direction_flip_replaces_the_stop():
+    """Regression, found by running a paper session.
+
+    A stop belongs to the position open when it was placed. After a flip it
+    sits on the wrong side of the market and can never fire, leaving the new
+    position completely unprotected. Weight does not always pass cleanly
+    through zero between trades, so a flat check alone misses this -- in the
+    session that surfaced it, one stop was carried across 17 round trips and
+    the win rate was 6%.
+    """
+    engine = _engine()
+    bars = _bars()
+
+    engine.state.current_weight = 0.3
+    engine._check_stop(bars)
+    first = engine.stops.positions["BTC/USDT"]
+    assert first.side == "long"
+
+    engine.state.current_weight = -0.3      # flip without passing through flat
+    engine._check_stop(bars)
+    second = engine.stops.positions["BTC/USDT"]
+    assert second.side == "short", "stale long stop survived a flip to short"
+    assert second is not first
+    assert second.bars_held == 0, "carried the old position's age"
+
+
+def test_a_long_stop_sits_below_price_and_a_short_stop_above():
+    """The property a flipped stop violates: it can never fire."""
+    engine = _engine()
+    bars = _bars()
+    price = float(bars["close"].iloc[-1])
+
+    engine.state.current_weight = 0.5
+    engine._check_stop(bars)
+    assert engine.stops.stop_for("BTC/USDT") < price
+
+    engine.state.current_weight = -0.5
+    engine._check_stop(bars)
+    assert engine.stops.stop_for("BTC/USDT") > price
+
+
+def test_risk_cap_is_derived_from_the_stop_distance():
+    engine = _engine()
+    engine.state.equity = 10_000.0
+    cap = engine._risk_capped_weight(_bars())
+    assert cap is not None and cap > 0
