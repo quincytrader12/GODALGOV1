@@ -7,6 +7,7 @@ leave the machine" and "loopback only" are tested rather than trusted.
 
 import json
 import stat
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -202,10 +203,36 @@ def test_telegram_summary_is_plain_text():
 # --- credentials -----------------------------------------------------------
 
 def test_credentials_are_stored_owner_only(tmp_path):
+    """The store must be unreadable by other accounts, on every platform.
+
+    Deliberately asserted through ``protection()`` rather than by inspecting
+    mode bits directly. Windows has no POSIX permission bits: os.open with a
+    mode sets at most the read-only flag and stat() reports 0o666 whatever was
+    requested, so a mode-bit assertion fails there even when the file is
+    correctly ACL-restricted -- and, worse, would pass on a Windows file that
+    is genuinely readable by everyone if the check were simply relaxed.
+    """
+    store = CredentialStore(directory=tmp_path)
+    store.add(ExchangeCredential("binance", "KEY1234567890", "SECRET_VALUE"))
+
+    protection = store.protection()
+    assert protection["exists"] is True
+    assert protection["restricted"] is True, (
+        f"credential file is readable by others: {protection['detail']}"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits only")
+def test_posix_store_is_mode_600(tmp_path):
+    """The POSIX half of the guarantee, checked concretely."""
     store = CredentialStore(directory=tmp_path)
     store.add(ExchangeCredential("binance", "KEY1234567890", "SECRET_VALUE"))
     mode = stat.S_IMODE(store.path.stat().st_mode)
-    assert not mode & 0o077, f"credential file is group/world readable: {oct(mode)}"
+    assert not mode & 0o077, f"mode {oct(mode)}"
+
+
+def test_protection_reports_when_there_is_no_store(tmp_path):
+    assert CredentialStore(directory=tmp_path).protection()["exists"] is False
 
 
 def test_listing_never_contains_secrets(tmp_path):
