@@ -7,6 +7,7 @@
     python -m godalgo feasibility --symbol BTC/USDT --timeframe 1h
     python -m godalgo preflight   --symbol BTC/USDT
     python -m godalgo ui          --demo
+    python -m godalgo scan        --timeframe 1h --top 20
 
 Deliberately thin. It wires existing components together and prints results; it
 holds no strategy logic of its own, so anything that works here works identically
@@ -149,6 +150,60 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         for name, count in summary.items():
             print(f"  {name:<22s} {count}")
     return 0
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    """Rank a universe and report what is worth trading, and what is not.
+
+    Rejections are printed alongside selections on purpose: knowing that
+    everything qualified but was the same trade is a different situation from
+    nothing qualifying, and the counts distinguish them.
+    """
+    import ccxt
+
+    from godalgo.data.feed import OHLCVFeed, bars_per_day
+    from godalgo.data.scanner import MarketScanner, ScanCriteria
+    from godalgo.execution.broker import FeeSchedule
+    from godalgo.strategies.momentum import MomentumStrategy
+
+    exchange = getattr(ccxt, args.exchange)({"enableRateLimit": True})
+    print(f"loading markets from {args.exchange} ...", file=sys.stderr)
+    try:
+        markets = exchange.load_markets()
+        tickers = exchange.fetch_tickers() if exchange.has.get("fetchTickers") else {}
+    except ccxt.BaseError as exc:
+        raise DataUnavailable(f"could not reach {args.exchange}: {exc}") from exc
+
+    symbols = [
+        s for s, m in markets.items()
+        if m.get("active") and m.get("quote") == args.quote and m.get("spot", True)
+    ]
+    # Rank by turnover before fetching bars: pulling history for every listing
+    # would be thousands of calls to score names that cannot pass the liquidity
+    # filter anyway.
+    symbols.sort(key=lambda s: -(tickers.get(s, {}).get("quoteVolume") or 0))
+    symbols = symbols[: args.top]
+    print(f"fetching {len(symbols)} histories ...", file=sys.stderr)
+
+    feed = OHLCVFeed(exchange_id=args.exchange, cache_dir=DEFAULT_CACHE)
+    history = {}
+    for symbol in symbols:
+        try:
+            bars = feed.fetch(symbol, args.timeframe, limit=args.limit)
+            if len(bars) >= 400:
+                history[symbol] = bars
+        except (ccxt.BaseError, ValueError) as exc:
+            print(f"  skipped {symbol}: {exc}", file=sys.stderr)
+
+    scanner = MarketScanner(
+        criteria=ScanCriteria(quote_currency=args.quote, max_candidates=args.max_candidates),
+        fees=FeeSchedule(maker=args.maker_fee, taker=args.taker_fee),
+        bars_per_day=bars_per_day(args.timeframe),
+        holding_bars=MomentumStrategy().expected_holding_bars,
+    )
+    result = scanner.scan(history, tickers)
+    print(result.summary())
+    return 0 if result.selected else 1
 
 
 def cmd_feasibility(args: argparse.Namespace) -> int:
@@ -389,6 +444,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_feas.add_argument("--taker-fee", type=float, default=0.0006)
     p_feas.add_argument("--spread-bps", type=float, default=2.0)
     p_feas.set_defaults(func=cmd_feasibility)
+
+    p_scan = sub.add_parser("scan", help="rank a universe and report what is tradeable")
+    p_scan.add_argument("--exchange", default="binance")
+    p_scan.add_argument("--quote", default="USDT")
+    p_scan.add_argument("--timeframe", default="1h")
+    p_scan.add_argument("--top", type=int, default=25,
+                        help="most liquid N symbols to fetch history for")
+    p_scan.add_argument("--limit", type=int, default=1500)
+    p_scan.add_argument("--max-candidates", type=int, default=6)
+    p_scan.add_argument("--maker-fee", type=float, default=0.0002)
+    p_scan.add_argument("--taker-fee", type=float, default=0.0006)
+    p_scan.set_defaults(func=cmd_scan)
 
     p_pre = sub.add_parser(
         "preflight", help="validate venue, credentials, and symbol without trading"

@@ -49,7 +49,7 @@ python -m godalgo backtest --symbol BTC/USDT --timeframe 1h --limit 8000
 python -m godalgo evolve   --symbol BTC/USDT --candidates 16
 python -m godalgo live     --symbol BTC/USDT --bar-seconds 60   # dry run by default
 python -m godalgo ledger
-pytest                     # 112 tests
+pytest                     # 268 tests
 ```
 
 ## What frequency can it trade?
@@ -157,6 +157,94 @@ authentication**, so:
 | **The UI cannot trade** | It is a read-only view. It never places orders or mutates engine state — a UI that can trade is a second, untested path to the exchange |
 
 Secrets never leave your machine.
+
+## Scanning and autonomy
+
+The bot scans a universe, trades what qualifies, sizes off buying power, and
+retunes itself — all without manual input.
+
+```bash
+python -m godalgo scan --timeframe 1h --top 25
+```
+
+### What the scanner rejects, and why that is the point
+
+Filters run cheapest-first, and each rejects more than the next:
+
+| Filter | Rejects |
+|---|---|
+| **Liquidity** | Thin books that fail on execution whatever the signal says |
+| **Volatility band** | Too quiet to clear costs; too violent to size |
+| **Feasibility** | **Expected edge below round-trip cost** |
+| **Regime clarity** | No readable regime |
+| **Correlation** | Symbols that are the same trade as one already selected |
+
+The feasibility filter is the one most scanners omit. A symbol can be the
+strongest trend in the universe and still be untradeable because its moves are
+smaller than its spread — ranking on signal strength alone selects exactly
+those instruments.
+
+The correlation pass is not optional in crypto. On a test universe of BTC/ETH/SOL
+clones the scanner selected **one** and rejected the other two as *"correlated
+with a selection"*. Without it you hold one bet three times while believing you
+are diversified.
+
+### Portfolio supervision
+
+`PortfolioSupervisor` runs one engine per selected symbol and owns everything
+only meaningful across them:
+
+- **Aggregate gross exposure** — a per-symbol cap says nothing about the total;
+  three engines each at "20% of equity" is 60% of the account
+- **Buying power** divided among engines rather than promised in full to each
+- **Universe rotation** with a minimum hold, so a symbol on the selection
+  threshold is not churned in and out at full cost
+- **Retiring flattens first** — dropping the engine that owns a position leaves
+  it open with nothing managing its stop
+
+Reductions are never blocked by an exposure limit. A limit that prevents risk
+being *reduced* is not a risk limit.
+
+### Autonomous retuning
+
+`Autopilot` refits parameters on a schedule while trading and swaps in only what
+clears the same promotion gate a human run faces.
+
+| Permitted | Forbidden |
+|---|---|
+| Propose parameters within declared bounds | Lower its own acceptance criteria |
+| Swap after passing the gate | Swap under an open position |
+| Search on a worker thread | Touch `RiskLimits` |
+
+Criteria are a frozen dataclass and Autopilot holds no reference to
+`RiskLimits`. **The bot can learn how to trade; it cannot learn to take more
+risk.** Off by default — self-modification is opt-in, like live trading.
+
+### Stops and sizing
+
+| Mechanism | Question it answers |
+|---|---|
+| **Initial stop** (ATR) | How much am I willing to lose being wrong? |
+| **Break-even move** | When does this trade stop being able to hurt me? |
+| **Trailing stop** | How much open gain will I give back? |
+
+All in ATR multiples, not percentages, so one configuration behaves sensibly on
+a quiet pair and a violent one. **The ratchet is structural** — a stop can only
+move toward price. Widening one as price approaches is how a bounded loss
+becomes unbounded, so it is impossible rather than discouraged.
+
+Size follows from the stop:
+
+```
+quantity = equity × risk_per_trade / |entry − stop|
+```
+
+Every trade risks the same fraction regardless of stop width — a 4% stop and a
+1% stop both risk 1%. Sizing by notional instead makes risk-per-trade a function
+of volatility, which is the thing being controlled. Sizing off *current* equity
+is what compounds the account and what makes drawdowns self-limiting; a steeper
+drawdown taper sits on top, floored so the system keeps enough size to trade
+back. Orders cap at 95% of available buying power.
 
 ## Execution
 
@@ -303,6 +391,10 @@ own stop-loss does not have a stop-loss.**
 | `ui/` | Local terminal: position tracking, journal, Telegram, credentials, server |
 | `feasibility.py` | Can this configuration trade at this frequency? |
 | `data/stream.py` | Tick → bar aggregation on wall-clock boundaries |
+| `data/scanner.py` | Universe ranking: liquidity, feasibility, correlation |
+| `portfolio/supervisor.py` | Multi-symbol exposure, buying power, rotation |
+| `risk/stops.py` | Initial, break-even and trailing stops — ratcheted |
+| `evolve/autopilot.py` | Retunes itself while trading, behind the gate |
 | `backtest/` | Engine with costs; metrics incl. deflated Sharpe and PBO |
 | `evolve/` | Purged walk-forward, parameter search, promotion gate + ledger |
 
@@ -311,6 +403,10 @@ own stop-loss does not have a stop-loss.**
 112 tests. Backtest, evolution, and execution paths are implemented and tested,
 including order construction, the economic gate, paper fill semantics, arming
 refusal, and the session estimator's negative case.
+
+**Multi-symbol trading is built but not yet driven end-to-end.** The scanner and
+supervisor are implemented and tested, but `godalgo live` still runs a single
+engine — wiring the supervisor into the CLI loop is the remaining step.
 
 **Not verified against a live venue.** This development sandbox blocks exchange
 APIs at the proxy, so everything network-facing — the OHLCV feed's pagination
