@@ -28,7 +28,7 @@ from pathlib import Path
 import ccxt
 import pandas as pd
 
-__all__ = ["OHLCVFeed", "timeframe_to_minutes", "bars_per_day"]
+__all__ = ["OHLCVFeed", "bars_per_day", "timeframe_to_minutes"]
 
 logger = logging.getLogger(__name__)
 
