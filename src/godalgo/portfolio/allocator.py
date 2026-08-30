@@ -109,6 +109,8 @@ def blend_signals(
     regimes: pd.Series,
     confidences: pd.Series,
     config: AllocationConfig | None = None,
+    session_tilt: pd.Series | None = None,
+    tilt_weight: float = 0.0,
 ) -> pd.DataFrame:
     """Combine both strategies' convictions into one target series.
 
@@ -118,11 +120,19 @@ def blend_signals(
         regimes: ``Regime`` per bar.
         confidences: Classifier confidence per bar, in [0, 1].
         config: Allocation controls.
+        session_tilt: Optional per-bar session drift tilt in [-1, 1], from
+            ``godalgo.features.session``. Applied as a convex blend so it
+            modulates the strategies rather than adding exposure on top of them
+            -- an additive overlay would let the calendar raise gross risk
+            beyond what the regime allocation authorised.
+        tilt_weight: Share of the final conviction the tilt may contribute.
+            Zero disables the overlay entirely.
 
     Returns:
         Frame indexed like the inputs with columns ``momentum``, ``reversion``
-        (post-weight contributions), ``combined`` (their sum, the target
-        conviction), and ``w_momentum`` / ``w_reversion`` for attribution.
+        (post-weight contributions), ``combined`` (the blended target
+        conviction), ``w_momentum`` / ``w_reversion`` for attribution, and
+        ``session_tilt`` when the overlay is active.
 
     Raises:
         ValueError: If the input indexes are not aligned. Silent misalignment
@@ -156,14 +166,29 @@ def blend_signals(
 
     mom_contrib = momentum.fillna(0.0).to_numpy(dtype=float) * w_mom
     rev_contrib = reversion.fillna(0.0).to_numpy(dtype=float) * w_rev
+    strategy_signal = mom_contrib + rev_contrib
 
-    return pd.DataFrame(
-        {
-            "momentum": mom_contrib,
-            "reversion": rev_contrib,
-            "combined": np.clip(mom_contrib + rev_contrib, -1.0, 1.0),
-            "w_momentum": w_mom,
-            "w_reversion": w_rev,
-        },
-        index=index,
-    )
+    columns = {
+        "momentum": mom_contrib,
+        "reversion": rev_contrib,
+        "w_momentum": w_mom,
+        "w_reversion": w_rev,
+    }
+
+    if session_tilt is not None and tilt_weight > 0.0:
+        if not session_tilt.index.equals(index):
+            raise ValueError("session_tilt index is not aligned with momentum index")
+        tilt = session_tilt.fillna(0.0).to_numpy(dtype=float)
+
+        # Convex blend, and the tilt is scaled by the risk the regime allocator
+        # already authorised (w_mom + w_rev). In an indeterminate regime the
+        # strategies are deliberately de-risked; the session overlay must not
+        # quietly restore that exposure on calendar grounds alone.
+        authorised = w_mom + w_rev
+        combined = (1.0 - tilt_weight) * strategy_signal + tilt_weight * tilt * authorised
+        columns["session_tilt"] = tilt
+    else:
+        combined = strategy_signal
+
+    columns["combined"] = np.clip(combined, -1.0, 1.0)
+    return pd.DataFrame(columns, index=index)

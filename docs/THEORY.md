@@ -219,7 +219,121 @@ and a grid spends most of its budget resolving the ones that do not.
 
 ---
 
-## 7. Sizing and risk
+## 7. The overnight drift anomaly, and why it does not port directly
+
+**The equity finding.** *Cooper, Cliff & Gulen (2008)* and *Lou, Polk & Skouras
+(2019)* document that essentially the entire US equity risk premium accrues
+**close-to-open**, while the intraday open-to-close return is approximately zero
+or negative. *Hendershott, Livdan & Rösch (2020)* find the same night/day split
+holds for market beta itself. It is one of the most robust anomalies in equity
+microstructure.
+
+**Why it cannot be ported as-is.** Crypto trades 24/7. There is no close, no
+open, and no gap. The literal overnight return is undefined, and an
+implementation claiming to trade "the overnight anomaly" on BTC/USDT would be
+trading a quantity that does not exist.
+
+**What does transfer: the mechanism.** Lou, Polk & Skouras attribute the effect
+to **clientele** — different participant types transact at different times, and
+their systematic order-flow imbalances create predictable, partially-reversing
+price pressure. That mechanism requires only that *who is trading* varies with
+the clock. It does not require an exchange to be closed.
+
+That condition holds in crypto through four structures:
+
+1. **Regional sessions** — Asia, Europe, and US hours carry different
+   participant mixes and therefore different flow.
+2. **The CME gap** — Bitcoin CME futures *do* close (Fri 22:00 → Sun 23:00 UTC),
+   so a real close-to-open gap exists in a major venue and propagates to spot.
+3. **Funding settlement** — perpetual funding settles on a fixed 8-hour cycle
+   (00:00 / 08:00 / 16:00 UTC), producing scheduled, predictable flow.
+4. **Risk-asset spillover** — crypto's equity correlation concentrates beta in
+   US cash-session hours.
+
+So the implementation estimates a **conditional drift by clock bucket**, learned
+from data, rather than assuming the equity calendar.
+
+### The multiple-testing problem this creates
+
+Estimating 24 hour-of-day means (or 168 hour-of-week) is 24 (or 168)
+simultaneous tests. Some bucket will look significant on noise alone, and
+tilting toward it is the same overfitting failure the promotion gate exists to
+prevent — merely relocated into a feature.
+
+**Empirical-Bayes (James-Stein) shrinkage** is the fix. Each bucket mean is
+pulled toward the grand mean by an amount set by its own noise:
+
+```
+λ_b = τ² / (τ² + σ_b²/n_b)        shrunk_b = λ_b·m_b + (1-λ_b)·grand_mean
+```
+
+where `τ²` is the estimated variance of *true* effects between buckets and
+`σ_b²/n_b` is that bucket's sampling variance. When the observed spread of
+bucket means is no larger than sampling noise would produce, `τ²` floors at zero
+and **every bucket shrinks fully away**. That is the correct answer to "there is
+no session effect here", and the estimator is built to be able to reach it.
+
+Measured on synthetic data: given pure noise, the best-looking hour showed a
+raw **3.27bps** drift — convincing if taken at face value — and shrinkage
+reduced it to **0.000bps** (λ = 0). An implanted +6bps US-session effect survived
+at λ ≈ 0.54.
+
+### How it attaches to the strategies
+
+The overlay is a **convex blend**, not an additive signal:
+
+```
+combined = (1 - w)·strategy_signal + w·tilt·authorised_risk
+```
+
+Two properties matter. It is convex, so the calendar modulates the strategies
+rather than adding exposure on top of them. And the tilt is scaled by
+`authorised_risk` (the weight the regime allocator granted), so a session tilt
+cannot restore exposure that an indeterminate regime deliberately withheld.
+
+The profile is refit on a **trailing window** and held between refits, exactly
+as the regime classifier is. Fitting once over full history would leak the
+future into every bar — and since the effect is estimated *from returns*, that
+leak would be a direct lookahead onto the very thing being traded.
+
+→ `src/godalgo/features/session.py`
+
+---
+
+## 8. Execution, and why "HFT" is mostly an economics problem
+
+True HFT — sub-millisecond, co-located, FPGA — is not reachable from Python over
+ccxt. Realistic latency is ~10–50ms for WebSocket market data and ~50–200ms for
+REST order placement.
+
+At that frequency the binding constraint is not speed, it is **cost
+arithmetic**. A round trip costs the spread plus two fees. At a 2bp spread and
+6bp taker fees that is **14bp** before slippage. A signal predicting a 5bp move
+is profitable in a backtest and loses money against a real venue. Executing a
+losing trade faster only loses faster.
+
+Hence the router's economic gate: expected edge must exceed modelled round-trip
+cost by a margin (default 1.5×) before an order is sent. Declining to trade is a
+valid output, and usually the right one.
+
+The same gate is applied in the backtest. Without that symmetry the backtest
+takes marginal trades the live router would refuse, and stops predicting live
+behaviour — which is the only thing a backtest is for.
+
+Two consequences fall out of the same arithmetic:
+
+- **Post-only by default.** The maker/taker gap (4bp vs 16bp round trip at
+  default fees) is usually larger than the edge a fast signal is chasing.
+- **Passive fills must be modelled honestly.** The paper broker requires price
+  to trade *through* a resting order, not merely touch it — you are behind the
+  existing queue. A broker that fills on touch inflates fill rates for exactly
+  the passive strategies that depend on them.
+
+→ `src/godalgo/execution/`
+
+---
+
+## 9. Sizing and risk
 
 **Volatility targeting.** Volatility is far more forecastable than return — it is
 strongly autocorrelated, while returns are near-unforecastable at these
@@ -242,7 +356,7 @@ target leaks money through changes too small to matter.
 
 ---
 
-## 8. Backtest conventions
+## 10. Backtest conventions
 
 Three conventions keep results honest. Each exists because its absence is a
 standard way to produce an untradeable backtest.
@@ -276,3 +390,8 @@ standard way to produce an untradeable backtest.
 - López de Prado, M. (2018). *Advances in Financial Machine Learning*. Wiley.
 - Bergstra, J. & Bengio, Y. (2012). *Random Search for Hyper-Parameter Optimization*. JMLR.
 - Wilder, J.W. (1978). *New Concepts in Technical Trading Systems*.
+- Cooper, M., Cliff, M. & Gulen, H. (2008). *Return Differences between Trading and Non-Trading Hours*.
+- Lou, D., Polk, C. & Skouras, S. (2019). *A Tug of War: Overnight Versus Intraday Expected Returns*. Journal of Financial Economics.
+- Hendershott, T., Livdan, D. & Rösch, D. (2020). *Asset Pricing: A Tale of Night and Day*. Journal of Financial Economics.
+- James, W. & Stein, C. (1961). *Estimation with Quadratic Loss*. Berkeley Symposium.
+- Efron, B. & Morris, C. (1975). *Data Analysis Using Stein's Estimator and its Generalizations*. JASA.

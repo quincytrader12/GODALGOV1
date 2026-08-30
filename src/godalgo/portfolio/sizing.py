@@ -130,3 +130,73 @@ def apply_turnover_buffer(
         held[i] = current
 
     return pd.Series(held, index=target.index, name=target.name)
+
+
+def apply_edge_gate(
+    target: pd.Series,
+    expected_edge_bps: pd.Series,
+    round_trip_cost_bps: float,
+    min_edge_multiple: float = 1.5,
+) -> pd.Series:
+    """Suppress position increases whose expected edge cannot pay their cost.
+
+    The backtest counterpart of ``OrderRouter``'s economic gate, and it exists so
+    the two agree. Without it the backtest happily takes every marginal trade
+    while the live router declines them, so the two systems trade differently
+    and the backtest stops predicting anything about live behaviour.
+
+    A round trip costs the spread plus two fees. A signal predicting a smaller
+    move than that is profitable on paper and loses money on contact with a
+    venue -- and a strategy that trades often enough will find many such
+    signals. Requiring a multiple, rather than mere break-even, absorbs the
+    estimation error in the edge forecast itself.
+
+    Reductions are always allowed. An exit must not be blocked because closing
+    the position is not independently profitable; that reasoning is how a
+    stop-loss fails to stop anything.
+
+    Args:
+        target: Desired weight per bar.
+        expected_edge_bps: Expected move over the holding horizon, per bar, bps.
+        round_trip_cost_bps: Modelled cost of entering and exiting, in bps.
+        min_edge_multiple: Required ratio of edge to cost. Exactly ``0.0``
+            disables the gate entirely; any other value below 1.0 is rejected,
+            since it would admit trades with negative expected value while
+            appearing to be a gate. Note that 1.0 is *break-even*, not "off".
+
+    Returns:
+        The gated weight series.
+
+    Raises:
+        ValueError: If ``min_edge_multiple`` is in (0, 1), or the indexes are
+            not aligned -- a misalignment would gate each bar on another bar's
+            edge estimate.
+    """
+    if min_edge_multiple == 0.0:
+        return target
+    if min_edge_multiple < 1.0:
+        raise ValueError(
+            "min_edge_multiple must be 0.0 (disabled) or >= 1.0; "
+            f"got {min_edge_multiple}, which admits negative-expectancy trades"
+        )
+    if not expected_edge_bps.index.equals(target.index):
+        raise ValueError("expected_edge_bps index is not aligned with target index")
+
+    required = round_trip_cost_bps * min_edge_multiple
+    desired = target.to_numpy(dtype=float)
+    edges = expected_edge_bps.to_numpy(dtype=float)
+
+    held = np.zeros_like(desired)
+    current = 0.0
+    for i in range(desired.size):
+        want = desired[i] if np.isfinite(desired[i]) else 0.0
+        edge = edges[i] if np.isfinite(edges[i]) else 0.0
+
+        reducing = abs(want) < abs(current) and (
+            want == 0.0 or (want > 0) == (current > 0)
+        )
+        if reducing or abs(edge) >= required:
+            current = float(want)
+        held[i] = current
+
+    return pd.Series(held, index=target.index, name=target.name)

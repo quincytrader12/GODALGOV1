@@ -16,19 +16,26 @@ design decision.
 ## How it fits together
 
 ```
-ccxt OHLCV ──> indicators ──> ┌─ momentum (TSMOM, vol-scaled, multi-horizon)
-                              └─ mean reversion (OU z-score, half-life gated)
-                                      │
-              regime classifier ──────┤   Hurst · variance ratio · ADF + half-life
-              (which bet is live?)    │
-                                      v
-                         regime-weighted blend
-                                      v
-                    vol targeting + no-trade band
-                                      v
-              RISK LIMITS  (deterministic, outside the loop)
-                                      v
-                                   orders
+ccxt OHLCV / ticks ──> indicators ──> ┌─ momentum (TSMOM, vol-scaled, multi-horizon)
+                                      └─ mean reversion (OU z-score, half-life gated)
+                                              │
+       regime classifier ────────────────────>│   Hurst · variance ratio · ADF
+       (which bet is live?)                   │
+                                              │
+       session overlay ──────────────────────>│   shrunk hour-of-clock drift
+       (overnight/clientele drift)            │
+                                              v
+                                 regime-weighted blend
+                                              v
+                            vol targeting + no-trade band
+                                              v
+                   EDGE GATE   expected edge >= 1.5x round-trip cost
+                                              v
+                   RISK LIMITS  deterministic, outside the loop
+                                              v
+                   ROUTER  post-only, throttled, one order per symbol
+                                              v
+                   BROKER   dry-run | paper | live (triple-armed)
 ```
 
 The self-improvement loop wraps this: propose parameters → purged walk-forward →
@@ -40,9 +47,75 @@ promotion gate (deflated Sharpe + PBO) → append-only ledger.
 uv sync
 python -m godalgo backtest --symbol BTC/USDT --timeframe 1h --limit 8000
 python -m godalgo evolve   --symbol BTC/USDT --candidates 16
+python -m godalgo live     --symbol BTC/USDT --bar-seconds 60   # dry run by default
 python -m godalgo ledger
-pytest                     # 69 tests
+pytest                     # 112 tests
 ```
+
+## Execution
+
+Event-driven and autonomous. To be clear about scope: this is **not** HFT in the
+co-located, sub-millisecond sense — that is not reachable from Python over ccxt.
+Realistic latency is ~10–50ms for WebSocket data and ~50–200ms for order
+placement.
+
+At that frequency the binding constraint is not latency but **cost arithmetic**.
+A round trip costs the spread plus two fees — at a 2bp spread and 6bp taker
+fees, 14bp before slippage. A signal predicting a 5bp move backtests profitably
+and loses money live. Speed does not fix that; it only loses faster.
+
+So every order passes an economic gate: expected edge must exceed modelled
+round-trip cost by 1.5×, or no order is sent. **The same gate runs in the
+backtest**, so the two paths take the same trades — without that symmetry a
+backtest predicts nothing about live behaviour.
+
+| Round trip @ default fees | Cost |
+|---|---|
+| Maker (post-only) | 4bp |
+| Taker (crossing) | 16bp |
+
+That 4× gap is why post-only is the default.
+
+### Safety
+
+| Control | Behaviour |
+|---|---|
+| **Trading mode** | `DRY_RUN` by default — computes orders, sends nothing |
+| **Live arming** | Needs `arm=True` **and** `GODALGO_ARM_LIVE=...` **and** credentials |
+| **Staleness watchdog** | Flattens if market data stops (a silent feed is worse than a bad signal) |
+| **Reconciliation** | Venue is the source of truth; drift beyond tolerance halts |
+| **Ambiguous sends** | Reported `UNKNOWN`, never "rejected" — then halt and reconcile |
+| **Kill switch** | Cancels resting orders *then* flattens, in that order |
+| **In-flight dedupe** | One order per symbol; a signal cannot become a double position |
+
+Credentials are read from the environment only, never accepted as arguments and
+never written to disk.
+
+## Session / overnight drift overlay
+
+The equity overnight anomaly (Cooper/Cliff/Gulen 2008; Lou/Polk/Skouras 2019) —
+essentially the whole equity risk premium accruing close-to-open — **does not
+port directly to crypto**, which has no close and therefore no gap.
+
+What ports is the *mechanism*: Lou/Polk/Skouras attribute the effect to
+clientele, predictable variation in *who is trading* by clock. That holds in
+crypto via regional sessions, the real CME futures gap (Fri 22:00 → Sun 23:00
+UTC), 8-hour funding settlement, and US-session equity spillover.
+
+So the overlay learns a conditional drift **by clock bucket**, with
+**empirical-Bayes (James-Stein) shrinkage** — because estimating 24 hourly means
+is 24 simultaneous tests, and some bucket always looks significant on noise.
+
+Measured on synthetic data:
+
+| Input | Best raw bucket | After shrinkage |
+|---|---|---|
+| Pure noise | 3.27bps | **0.000bps** (λ=0) |
+| Implanted +6bps US-session drift | 7.38bps | **+2.79bps** (λ=0.54) |
+
+It attaches as a convex blend scaled by the regime allocator's authorised risk,
+so the calendar modulates the strategies rather than adding exposure on top —
+and cannot restore risk an indeterminate regime withheld. Off by default.
 
 ## Self-improvement, and why it is gated
 
@@ -87,19 +160,32 @@ own stop-loss does not have a stop-loss.**
 | `features/` | Indicators; regime classification (Hurst, VR, ADF, half-life) |
 | `strategies/` | Momentum and mean reversion, over a bounded parameter space |
 | `portfolio/` | Regime allocator; vol targeting, fractional Kelly, no-trade band |
+| `features/session.py` | Overnight/session drift, James-Stein shrunk |
 | `risk/limits.py` | Deterministic caps and kill switch — **not tunable** |
+| `execution/` | Brokers (dry-run/paper/live), router, reconciler, live engine |
+| `data/stream.py` | Tick → bar aggregation on wall-clock boundaries |
 | `backtest/` | Engine with costs; metrics incl. deflated Sharpe and PBO |
 | `evolve/` | Purged walk-forward, parameter search, promotion gate + ledger |
 
 ## Status
 
-Backtest and evolution paths are implemented and tested (69 tests). **No live
-order execution yet** — there is no exchange authentication, no order router, and
-no position reconciliation. The data feed is read-only and accepts no API keys.
+112 tests. Backtest, evolution, and execution paths are implemented and tested,
+including order construction, the economic gate, paper fill semantics, arming
+refusal, and the session estimator's negative case.
 
-The feed's network path is unverified: this development sandbox blocks exchange
-APIs, so pagination and retry logic have been reviewed but not exercised against
-a live venue. Its frame-normalisation logic is covered by tests.
+**Not verified against a live venue.** This development sandbox blocks exchange
+APIs at the proxy, so everything network-facing — the OHLCV feed's pagination
+and retry, and the entire `LiveBroker` path — has been written and reviewed but
+never exercised against a real exchange. Treat first live contact as untested
+code.
+
+**No market-data stream is wired up.** `LiveEngine` exposes `on_tick()` and
+`on_book()` and is driven by whatever feeds them; a `ccxt.pro` WebSocket driver
+is not yet written.
+
+Before any real capital: run in `paper` against live data for long enough to
+confirm fill rates resemble the paper model's, and verify the kill switch
+actually flattens on a venue.
 
 ## Setup
 

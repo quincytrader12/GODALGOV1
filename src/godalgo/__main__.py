@@ -3,6 +3,7 @@
     python -m godalgo backtest --symbol BTC/USDT --timeframe 1h --limit 8000
     python -m godalgo evolve   --symbol BTC/USDT --candidates 16
     python -m godalgo ledger
+    python -m godalgo live      --symbol BTC/USDT --bar-seconds 60 --mode paper
 
 Deliberately thin. It wires existing components together and prints results; it
 holds no strategy logic of its own, so anything that works here works identically
@@ -115,6 +116,61 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_live(args: argparse.Namespace) -> int:
+    """Run the autonomous loop.
+
+    Defaults to dry run. Paper and live are opt-in, and live additionally
+    requires the arming environment variable that ``LiveBroker`` checks.
+    """
+    import asyncio
+
+    from godalgo.execution.broker import DryRunBroker, PaperBroker
+    from godalgo.execution.engine import LiveEngine, LiveEngineConfig
+    from godalgo.execution.types import TradingMode
+    from godalgo.features.session import SessionConfig
+
+    mode = TradingMode(args.mode)
+    if mode is TradingMode.LIVE:
+        from godalgo.execution.live import ArmingError, LiveBroker
+
+        try:
+            broker = LiveBroker(arm=True)
+        except ArmingError as exc:
+            print(f"refusing to start live: {exc}", file=sys.stderr)
+            return 2
+    elif mode is TradingMode.PAPER:
+        broker = PaperBroker(starting_equity=args.equity)
+    else:
+        broker = DryRunBroker(starting_equity=args.equity)
+
+    bars = _load_bars(args)
+    config = LiveEngineConfig(
+        symbol=args.symbol,
+        bar_seconds=args.bar_seconds,
+        mode=mode,
+        session=SessionConfig(tilt_weight=args.session_tilt) if args.session_tilt > 0 else None,
+    )
+    engine = LiveEngine(broker, MomentumStrategy(), MeanReversionStrategy(), config)
+    engine.seed_history(bars)
+
+    print(
+        f"engine ready: {args.symbol} {args.bar_seconds}s bars, mode={mode.value}, "
+        f"{engine.bars.n_complete} bars seeded (warm-up {engine._warmup})",
+        file=sys.stderr,
+    )
+    print(
+        "no live market-data stream is wired up yet -- feed ticks via "
+        "LiveEngine.on_tick()/on_book(). See README.",
+        file=sys.stderr,
+    )
+    asyncio.run(_report(engine))
+    return 0
+
+
+async def _report(engine) -> None:
+    print(f"state: {engine.state.snapshot()}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="godalgo", description=__doc__)
     parser.add_argument("--verbose", action="store_true")
@@ -144,6 +200,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ev.add_argument("--note", default=None)
     p_ev.set_defaults(func=cmd_evolve)
+
+    p_live = sub.add_parser("live", help="run the autonomous execution loop")
+    add_data_args(p_live)
+    p_live.add_argument("--bar-seconds", type=int, default=60)
+    p_live.add_argument(
+        "--mode", choices=["dry_run", "paper", "live"], default="dry_run",
+        help="dry_run computes orders and sends nothing (default)",
+    )
+    p_live.add_argument("--equity", type=float, default=10_000.0)
+    p_live.add_argument(
+        "--session-tilt", type=float, default=0.0,
+        help="session/overnight drift overlay weight in [0,1]; 0 disables",
+    )
+    p_live.set_defaults(func=cmd_live)
 
     p_led = sub.add_parser("ledger", help="show promotion history")
     p_led.add_argument("--tail", type=int, default=20)

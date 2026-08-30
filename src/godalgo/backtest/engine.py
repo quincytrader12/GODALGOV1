@@ -29,9 +29,15 @@ import pandas as pd
 
 from godalgo.backtest.metrics import PerformanceStats, compute_stats
 from godalgo.core.types import Regime
+from godalgo.features.indicators import ewma_volatility, log_returns
 from godalgo.features.regime import classify_regime
+from godalgo.features.session import SessionConfig, fit_session_profile
 from godalgo.portfolio.allocator import AllocationConfig, blend_signals
-from godalgo.portfolio.sizing import apply_turnover_buffer, volatility_target_scalar
+from godalgo.portfolio.sizing import (
+    apply_edge_gate,
+    apply_turnover_buffer,
+    volatility_target_scalar,
+)
 from godalgo.risk.limits import RiskLimits, RiskManager
 from godalgo.strategies.base import Strategy
 
@@ -82,6 +88,33 @@ class BacktestConfig:
     """Bars between regime refits. Daily on 1h bars by default."""
 
     turnover_buffer: float = 0.05
+
+    min_edge_multiple: float = 1.5
+    """Required ratio of expected edge to round-trip cost before increasing risk.
+
+    Mirrors ``RoutingConfig.min_edge_multiple`` so the backtest and the live
+    router take the same trades. 1.0 is break-even, not "off" -- pass exactly
+    0.0 to disable the gate.
+    """
+
+    edge_horizon_bars: float = 3.0
+    """Bars the expected-edge estimate is projected over. Matches the live engine."""
+
+    session: SessionConfig | None = None
+    """Overnight/session drift overlay. ``None`` disables it.
+
+    Off by default: it is a real but small conditional effect, and it should be
+    switched on deliberately after inspecting the fitted profile, not inherited
+    silently.
+    """
+
+    session_window: int = 2000
+    """Trailing bars used to fit the session profile."""
+
+    session_refit_every: int = 500
+    """Bars between session refits. The effect is slow-moving; refitting often
+    only adds estimation noise."""
+
     costs: CostModel = field(default_factory=CostModel)
     allocation: AllocationConfig = field(default_factory=AllocationConfig)
     risk: RiskLimits = field(default_factory=RiskLimits)
@@ -187,6 +220,37 @@ def compute_regime_series(
     )
 
 
+def compute_session_tilt(
+    bars: pd.DataFrame,
+    config: SessionConfig,
+    window: int,
+    refit_every: int,
+) -> pd.Series:
+    """Rolling, causal session tilt.
+
+    Refits on a trailing window and holds the profile between refits, exactly as
+    the regime classifier does. Fitting once on the whole history would leak the
+    future into every bar -- and because the session effect is estimated *from
+    returns*, that leak would be a direct lookahead onto the thing being traded.
+
+    Bars before the first fit get a zero tilt, so the overlay is simply inactive
+    during warm-up rather than guessing.
+    """
+    close = bars["close"].astype(float)
+    returns = log_returns(close)
+    n = len(close)
+    tilts = np.zeros(n)
+
+    profile = None
+    for i in range(n):
+        if i >= window and (i - window) % refit_every == 0:
+            profile = fit_session_profile(returns.iloc[i - window : i], config)
+        if profile is not None:
+            tilts[i] = profile.tilt(close.index[i])
+
+    return pd.Series(tilts, index=close.index, name="session_tilt")
+
+
 def run_backtest(
     bars: pd.DataFrame,
     momentum: Strategy,
@@ -237,12 +301,20 @@ def run_backtest(
     regime_frame = compute_regime_series(
         bars, symbol, cfg.regime_window, cfg.regime_refit_every
     )
+    session_tilt = None
+    if cfg.session is not None:
+        session_tilt = compute_session_tilt(
+            bars, cfg.session, cfg.session_window, cfg.session_refit_every
+        )
+
     blended = blend_signals(
         mom_signal,
         rev_signal,
         regime_frame["regime"],
         regime_frame["confidence"],
         cfg.allocation,
+        session_tilt=session_tilt,
+        tilt_weight=cfg.session.tilt_weight if cfg.session else 0.0,
     )
 
     # --- sizing ------------------------------------------------------------
@@ -257,7 +329,18 @@ def run_backtest(
     raw_target = (blended["combined"] * vol_scalar).clip(
         -cfg.risk.max_gross_weight, cfg.risk.max_gross_weight
     )
-    buffered = apply_turnover_buffer(raw_target, cfg.turnover_buffer)
+    # Economic gate, applied before the turnover buffer so that a trade which
+    # cannot pay for itself is never proposed in the first place.
+    bar_vol = ewma_volatility(np.log(close).diff(), halflife=30.0)
+    expected_edge_bps = (
+        blended["combined"].abs() * bar_vol * np.sqrt(cfg.edge_horizon_bars) * 1e4
+    ).fillna(0.0)
+    round_trip_cost_bps = 2.0 * (cfg.costs.fee_rate + cfg.costs.slippage_rate) * 1e4
+
+    gated = apply_edge_gate(
+        raw_target, expected_edge_bps, round_trip_cost_bps, cfg.min_edge_multiple
+    )
+    buffered = apply_turnover_buffer(gated, cfg.turnover_buffer)
 
     # Trade at t+1 on a signal formed from t's close. Everything above this
     # line may look at bar t; nothing below it may.
@@ -320,8 +403,10 @@ def run_backtest(
             "variance_ratio": regime_frame["variance_ratio"],
             "w_momentum": blended["w_momentum"],
             "w_reversion": blended["w_reversion"],
+            "session_tilt": blended.get("session_tilt", pd.Series(0.0, index=timestamps)),
             "combined": blended["combined"],
             "vol_scalar": vol_scalar,
+            "expected_edge_bps": expected_edge_bps,
             "target_weight": desired,
             "weight": weights,
             "cost": costs,
