@@ -1,0 +1,26 @@
+[project]
+name = "godalgov1"
+version = "0.1.0"
+description = "Algorithmic crypto trading bot"
+requires-python = ">=3.11"
+
+dependencies = [
+  # Unified API across ~100 crypto exchanges.
+  # ccxt.async_support and ccxt.pro (WebSocket streaming) ship in the base
+  # package as of v4 -- no extras required.
+  "ccxt==4.5.76",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "ruff>=0.9",
+]
+
+[tool.uv]
+# No importable package in-tree yet; architecture still being decided.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
