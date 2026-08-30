@@ -9,6 +9,8 @@ models.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
@@ -200,3 +202,125 @@ def apply_edge_gate(
         held[i] = current
 
     return pd.Series(held, index=target.index, name=target.name)
+
+
+@dataclass(frozen=True, slots=True)
+class GrowthConfig:
+    """How aggressively the account compounds, and what caps that.
+
+    Growth here means compounding: every size is a fraction of *current*
+    equity, so gains raise the next position and losses lower it. That is what
+    makes an equity curve compound rather than grow linearly -- and, just as
+    importantly, what makes a drawdown self-limiting, since a shrinking account
+    automatically takes smaller risk.
+    """
+
+    risk_per_trade: float = 0.01
+    """Fraction of equity risked between entry and stop.
+
+    1% is the standard practitioner figure and it is not arbitrary: at 1%, a
+    ten-trade losing streak costs about 10% of the account, which is
+    survivable. At 5% the same streak costs 40%, which needs a 67% gain to
+    recover from. The asymmetry of drawdown recovery is why this number stays
+    small.
+    """
+
+    max_risk_per_trade: float = 0.02
+    """Hard ceiling, applied after every adjustment below."""
+
+    max_buying_power_fraction: float = 0.95
+    """Share of available buying power a single order may consume.
+
+    Never 1.0. Fees, funding, and price movement between sizing and fill all
+    need headroom, and an order rejected for insufficient balance is a missed
+    trade rather than a safe one.
+    """
+
+    drawdown_derisk: bool = True
+    """Reduce risk while in drawdown.
+
+    Compounding cuts size automatically as equity falls, but only in
+    proportion. This adds a second, steeper reduction: the conditions that
+    produced a drawdown are usually still present, and the account has less
+    room to absorb being wrong again.
+    """
+
+    derisk_floor: float = 0.35
+    """Smallest multiplier drawdown de-risking may apply."""
+
+    def __post_init__(self) -> None:
+        if not 0 < self.risk_per_trade <= self.max_risk_per_trade:
+            raise ValueError("risk_per_trade must be positive and within max_risk_per_trade")
+        if not 0 < self.max_risk_per_trade < 1:
+            raise ValueError("max_risk_per_trade must be in (0, 1)")
+        if not 0 < self.max_buying_power_fraction <= 1:
+            raise ValueError("max_buying_power_fraction must be in (0, 1]")
+
+    def effective_risk(self, drawdown: float) -> float:
+        """Risk fraction after drawdown de-risking."""
+        risk = self.risk_per_trade
+        if self.drawdown_derisk and drawdown > 0:
+            # Linear taper: at 20% drawdown the multiplier is 0.6, floored so
+            # the system never sizes itself down to irrelevance and loses the
+            # ability to trade its way back.
+            multiplier = max(self.derisk_floor, 1.0 - drawdown * 2.0)
+            risk *= multiplier
+        return min(risk, self.max_risk_per_trade)
+
+
+def risk_based_size(
+    equity: float,
+    entry_price: float,
+    stop_price: float,
+    *,
+    buying_power: float | None = None,
+    growth: GrowthConfig | None = None,
+    drawdown: float = 0.0,
+    conviction: float = 1.0,
+) -> float:
+    """Order quantity such that a stop-out costs a fixed fraction of equity.
+
+    The size follows from the stop rather than the other way round:
+
+        quantity = (equity * risk) / |entry - stop|
+
+    A wide stop therefore gets a small position and a tight stop a large one,
+    so **every trade risks the same amount** regardless of how volatile the
+    instrument is. Sizing by notional instead makes risk-per-trade a function
+    of volatility, which is precisely the thing you were trying to control.
+
+    Args:
+        equity: Current account equity. Using current rather than starting
+            equity is what makes the account compound.
+        entry_price: Intended entry.
+        stop_price: Stop for this position. Must differ from entry.
+        buying_power: Funds actually available. When given, the order is capped
+            so it cannot be rejected for insufficient balance.
+        growth: Risk configuration.
+        drawdown: Current drawdown as a fraction, for de-risking.
+        conviction: Signal strength in [0, 1], scaling risk within the cap.
+
+    Returns:
+        Quantity in base units. ``0.0`` when the inputs cannot support a
+        position -- an unusable stop returns no trade rather than a guess.
+    """
+    cfg = growth or GrowthConfig()
+
+    if equity <= 0 or entry_price <= 0:
+        return 0.0
+    stop_distance = abs(entry_price - stop_price)
+    if stop_distance <= 0 or not np.isfinite(stop_distance):
+        # No stop distance means no defined risk. Sizing anything here would be
+        # sizing against an unbounded loss.
+        return 0.0
+
+    risk_fraction = cfg.effective_risk(drawdown) * float(np.clip(conviction, 0.0, 1.0))
+    quantity = (equity * risk_fraction) / stop_distance
+
+    if buying_power is not None and buying_power > 0:
+        affordable = (buying_power * cfg.max_buying_power_fraction) / entry_price
+        quantity = min(quantity, affordable)
+    elif buying_power is not None:
+        return 0.0
+
+    return float(max(0.0, quantity))

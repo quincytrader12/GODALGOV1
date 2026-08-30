@@ -449,6 +449,36 @@ class LiveEngine:
             return True
         return False
 
+    def swap_strategies(self, momentum: Strategy, reversion: Strategy) -> None:
+        """Replace the running strategies.
+
+        Called by Autopilot after a candidate clears the promotion gate. The
+        engine owns the swap so it can re-derive warm-up: a new parameter set
+        may need more history than the old one, and signalling on a window the
+        new configuration has not warmed up on would be trading a strategy that
+        has not yet seen enough data to have an opinion.
+        """
+        self.momentum = momentum
+        self.reversion = reversion
+        self._warmup = max(momentum.warmup, reversion.warmup, self.config.regime_window)
+        logger.warning(
+            "strategies swapped: %s | %s (warm-up now %d bars)",
+            momentum, reversion, self._warmup,
+        )
+
+    def is_flat(self) -> bool:
+        """Whether the engine believes it holds no position.
+
+        Read from the last routed weight rather than from the venue, because
+        this gates a parameter swap rather than an order -- and a swap must not
+        block on a network round trip inside the trading loop.
+        """
+        return abs(self.state.current_weight) < 1e-9
+
+    def history(self) -> pd.DataFrame:
+        """Completed bars, for the autopilot's search."""
+        return self.bars.frame()
+
     async def check_staleness(self, now: datetime | None = None) -> bool:
         """Flatten if market data has stopped. Returns True if it halted.
 

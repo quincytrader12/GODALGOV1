@@ -44,7 +44,7 @@ html, body {
 #shell {
   display: grid;
   grid-template-columns: 1fr var(--rail);
-  grid-template-rows: 34px 1fr 58px 210px;
+  grid-template-rows: 34px 1fr 96px 210px;
   grid-template-areas:
     "header  rail"
     "cluster rail"
@@ -162,15 +162,26 @@ html, body {
 
 #laser { grid-area: laser; display: flex; flex-direction: column; }
 
-.laser-body { flex: 1; display: flex; align-items: center; gap: 12px; padding: 0 14px; }
+.laser-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  padding: 2px 14px 0;
+  min-height: 0;
+}
+
+/* min-height: 0 for the same flex reason as the cluster canvas -- without it
+   the element will not shrink below the intrinsic height resize() gives it. */
+#ecg { flex: 1; min-height: 0; display: block; }
 
 .laser-track {
   position: relative;
-  flex: 1;
   height: 3px;
+  margin: 0 14px 7px;
   background: #1a0508;
   border-radius: 2px;
-  overflow: visible;
+  flex: 0 0 auto;
 }
 .laser-fill {
   position: absolute; inset: 0 auto 0 0;
@@ -187,19 +198,19 @@ html, body {
   box-shadow: 0 0 9px #fff, 0 0 20px var(--laser), 0 0 34px var(--laser);
   transition: left 0.5s ease;
 }
-.laser-scan {
-  position: absolute; top: -7px; bottom: -7px; width: 2px;
-  background: linear-gradient(180deg, transparent, rgba(255,255,255,0.8), transparent);
-  opacity: 0.65;
-  animation: sweep 3.4s linear infinite;
+.laser-readout {
+  display: flex; flex-direction: column; justify-content: center;
+  align-items: flex-end; gap: 1px; white-space: nowrap; min-width: 106px;
 }
-@keyframes sweep { from { left: 0; } to { left: 100%; } }
-
-.laser-readout { display: flex; gap: 16px; align-items: baseline; white-space: nowrap; }
-.laser-readout .label { font-size: 13px; letter-spacing: 0.2em; color: var(--laser); }
+.laser-readout .bpm {
+  font-size: 17px; color: var(--laser); font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 10px rgba(255,39,64,0.55);
+}
+.laser-readout .bpm.flat { color: var(--text-dim); text-shadow: none; }
+.laser-readout .label { font-size: 10px; letter-spacing: 0.18em; color: var(--laser); }
 .laser-readout .label.nominal { color: var(--green); }
 .laser-readout .label.degraded { color: var(--amber); }
-.laser-readout .pct { color: var(--text-bright); font-variant-numeric: tabular-nums; }
+.laser-readout .pct { color: var(--text-dim); font-size: 10px; font-variant-numeric: tabular-nums; }
 
 /* ---------- bottom row ---------- */
 
@@ -336,7 +347,7 @@ html, body {
 @media (max-width: 1100px) {
   #shell {
     grid-template-columns: 1fr;
-    grid-template-rows: 34px 1fr 58px 210px 260px;
+    grid-template-rows: 34px 1fr 96px 210px 260px;
     grid-template-areas: "header" "cluster" "laser" "bottom" "rail";
   }
   #rail { grid-template-rows: auto auto auto; }

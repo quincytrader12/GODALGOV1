@@ -19,6 +19,7 @@ const COLOR = {
 const state = {
   neurons: new Map(),   // id -> render node (position, velocity, data)
   selected: null,
+  hovered: null,
   equityHistory: [],
   tab: 'trades',
   journal: { entries: [], summaries: [] },
@@ -338,6 +339,199 @@ function somaPath(node, scale) {
   ctx.closePath();
 }
 
+
+/* ---------------------------------------------------------------- ECG
+ *
+ * The health beam as a cardiac monitor. Rate encodes condition rather than
+ * merely decorating it:
+ *
+ *   NOMINAL    ~64 bpm, steady        a healthy resting rhythm
+ *   DEGRADED   ~95 bpm                working harder
+ *   IMPAIRED   ~125 bpm, irregular    tachycardic, losing rhythm
+ *   CRITICAL   ~155 bpm, erratic
+ *   HALTED     flatline               asystole
+ *
+ * The flatline matters most. A halted bot holding no position is dead, and a
+ * monitor that keeps beeping cheerfully through it would be actively
+ * misleading -- the one state you must never have to read a number to notice.
+ */
+
+const ECG = {
+  buffer: null,
+  head: 0,
+  phase: 0,
+  accum: 0,
+  bpm: 0,
+  lastT: 0,
+  pxPerSec: 130,
+};
+
+/** Gaussian bump, the building block of each deflection. */
+function bump(t, mu, sigma) {
+  const d = (t - mu) / sigma;
+  return Math.exp(-0.5 * d * d);
+}
+
+/** One cardiac cycle: P wave, QRS complex, T wave. Phase in [0, 1). */
+function ecgWave(t) {
+  return (
+    0.13 * bump(t, 0.14, 0.024) -   // P: atrial depolarisation
+    0.11 * bump(t, 0.255, 0.008) +  // Q
+    1.00 * bump(t, 0.285, 0.007) -  // R: the spike
+    0.26 * bump(t, 0.320, 0.011) +  // S
+    0.30 * bump(t, 0.500, 0.038)    // T: ventricular repolarisation
+  );
+}
+
+/** Rate and rhythm irregularity from the health score. */
+function rhythmFor(health) {
+  if (health.halted) return { bpm: 0, jitter: 0, amp: 0 };
+  const s = health.score;
+  if (s >= 0.85) return { bpm: 64, jitter: 0.012, amp: 1.0 };
+  if (s >= 0.60) return { bpm: 95, jitter: 0.03, amp: 0.92 };
+  if (s >= 0.30) return { bpm: 126, jitter: 0.07, amp: 0.8 };
+  return { bpm: 156, jitter: 0.14, amp: 0.66 };
+}
+
+const ecgCanvas = $('ecg');
+const ectx = ecgCanvas.getContext('2d');
+let EW = 0, EH = 0;
+
+function resizeEcg() {
+  const rect = ecgCanvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  EW = Math.max(1, Math.round(rect.width));
+  EH = Math.max(1, Math.round(rect.height));
+  ecgCanvas.width = Math.round(EW * dpr);
+  ecgCanvas.height = Math.round(EH * dpr);
+  ectx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // One sample per pixel column. Preserve what is already on screen across a
+  // resize so the trace does not blank and restart.
+  const next = new Float32Array(EW);
+  if (ECG.buffer) {
+    const keep = Math.min(EW, ECG.buffer.length);
+    for (let i = 0; i < keep; i++) {
+      next[EW - keep + i] = ECG.buffer[(ECG.head + ECG.buffer.length - keep + i) % ECG.buffer.length];
+    }
+  }
+  ECG.buffer = next;
+  ECG.head = 0;
+}
+window.addEventListener('resize', resizeEcg);
+if (window.ResizeObserver) new ResizeObserver(resizeEcg).observe(ecgCanvas);
+
+function stepEcg(now, health) {
+  if (!ECG.buffer) return;
+  const dt = ECG.lastT ? Math.min(0.1, (now - ECG.lastT) / 1000) : 0;
+  ECG.lastT = now;
+
+  const { bpm, jitter, amp } = rhythmFor(health);
+  // Ease toward the target rate. A rate that snapped between values would look
+  // like a rendering glitch rather than a physiological change.
+  ECG.bpm += (bpm - ECG.bpm) * Math.min(1, dt * 1.6);
+
+  // Emit at a fixed spatial rate so sweep speed stays constant regardless of
+  // frame rate -- a real monitor's paper speed does not depend on its display.
+  ECG.accum += dt * ECG.pxPerSec;
+  const steps = Math.floor(ECG.accum);
+  ECG.accum -= steps;
+
+  const N = ECG.buffer.length;
+  for (let i = 0; i < steps; i++) {
+    let sample;
+    if (bpm <= 0) {
+      // Asystole: a flat line with only the faint noise of the instrument.
+      sample = (Math.random() - 0.5) * 0.012;
+    } else {
+      ECG.phase += (ECG.bpm / 60) / ECG.pxPerSec;
+      if (ECG.phase >= 1) {
+        // Beat-to-beat variability. A perfectly periodic trace reads as a test
+        // pattern; real rhythm is never exactly regular.
+        ECG.phase -= 1;
+        ECG.phase += (Math.random() - 0.5) * jitter;
+      }
+      sample = ecgWave((ECG.phase % 1 + 1) % 1) * amp
+             + (Math.random() - 0.5) * 0.014;
+    }
+    ECG.buffer[ECG.head] = sample;
+    ECG.head = (ECG.head + 1) % N;
+  }
+}
+
+function drawEcg(health) {
+  if (!ECG.buffer || EW < 2) return;
+  const N = ECG.buffer.length;
+  const mid = EH * 0.56;
+  const scale = EH * 0.40;
+
+  ectx.clearRect(0, 0, EW, EH);
+
+  // Monitor paper: fine graticule.
+  ectx.strokeStyle = 'rgba(255,39,64,0.055)';
+  ectx.lineWidth = 1;
+  ectx.beginPath();
+  for (let x = EW % 13; x < EW; x += 13) { ectx.moveTo(x, 0); ectx.lineTo(x, EH); }
+  for (let y = mid; y > 0; y -= 13) { ectx.moveTo(0, y); ectx.lineTo(EW, y); }
+  for (let y = mid; y < EH; y += 13) { ectx.moveTo(0, y); ectx.lineTo(EW, y); }
+  ectx.stroke();
+
+  ectx.strokeStyle = 'rgba(255,39,64,0.14)';
+  ectx.beginPath(); ectx.moveTo(0, mid); ectx.lineTo(EW, mid); ectx.stroke();
+
+  const yAt = (i) => mid - ECG.buffer[(ECG.head + i) % N] * scale;
+
+  // The trace fades toward the left, so the leading edge reads as "now".
+  ectx.lineCap = 'round';
+  ectx.lineJoin = 'round';
+
+  ectx.globalCompositeOperation = 'lighter';
+  for (const [width, alpha] of [[5.5, 0.10], [2.6, 0.22]]) {
+    ectx.strokeStyle = `rgba(255,39,64,${alpha})`;
+    ectx.lineWidth = width;
+    ectx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const x = i;
+      const y = yAt(i);
+      if (i === 0) ectx.moveTo(x, y); else ectx.lineTo(x, y);
+    }
+    ectx.stroke();
+  }
+  ectx.globalCompositeOperation = 'source-over';
+
+  // Core trace, brightening toward the head.
+  const grad = ectx.createLinearGradient(0, 0, EW, 0);
+  grad.addColorStop(0, 'rgba(255,39,64,0.12)');
+  grad.addColorStop(0.55, 'rgba(255,60,80,0.75)');
+  grad.addColorStop(1, 'rgba(255,150,160,1)');
+  ectx.strokeStyle = grad;
+  ectx.lineWidth = 1.5;
+  ectx.beginPath();
+  for (let i = 0; i < N; i++) {
+    const y = yAt(i);
+    if (i === 0) ectx.moveTo(i, y); else ectx.lineTo(i, y);
+  }
+  ectx.stroke();
+
+  // Sweep head: the bright point writing the trace.
+  const hy = yAt(N - 1);
+  ectx.globalCompositeOperation = 'lighter';
+  const dot = ectx.createRadialGradient(EW - 1, hy, 0, EW - 1, hy, 9);
+  dot.addColorStop(0, 'rgba(255,255,255,0.95)');
+  dot.addColorStop(0.3, 'rgba(255,80,95,0.7)');
+  dot.addColorStop(1, 'rgba(255,39,64,0)');
+  ectx.fillStyle = dot;
+  ectx.beginPath(); ectx.arc(EW - 1, hy, 9, 0, TAU); ectx.fill();
+  ectx.globalCompositeOperation = 'source-over';
+
+  if (health.halted) {
+    ectx.fillStyle = 'rgba(255,39,64,0.75)';
+    ectx.font = '10px ui-monospace, monospace';
+    ectx.textAlign = 'left';
+    ectx.fillText('ASYSTOLE — TRADING HALTED', 10, mid - 12);
+  }
+}
+
 /* ------------------------------------------------------------- cluster */
 
 const canvas = $('cluster-canvas');
@@ -371,9 +565,17 @@ if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
  *  dendrites into an indistinct felt where no individual cell can be read. */
 function radiusFor(n, count) {
   const base = Math.sqrt(Math.max(n.notional, 1)) * 0.42;
-  const crowding = Math.min(1, Math.sqrt(24 / Math.max(count, 1)));
-  const scaled = base * (0.55 + 0.45 * crowding);
-  return Math.max(4.5, Math.min(24, scaled));
+
+  // Hard area budget. A count-based taper alone still overflows at high
+  // counts, because it shrinks by a ratio rather than to a fit. Each cell
+  // occupies roughly a disc of 3r once its arbour is included, so solving
+  // n * pi * (3r)^2 = budget * panel area gives the largest radius that can
+  // actually fit -- and it holds at any count.
+  const budget = 0.34;
+  const area = Math.max(1, W * H);
+  const rMax = Math.sqrt((budget * area) / (Math.max(count, 1) * Math.PI * 9));
+
+  return Math.max(3.2, Math.min(24, base, rMax));
 }
 
 function syncNeurons(list) {
@@ -630,18 +832,33 @@ function draw(now) {
     const breathe = n.data.is_open
       ? 0.78 + 0.22 * Math.sin(t * 1.8 + n.morph.phase)
       : 1;
+
+    // Hover zoom, eased toward the target rather than snapped. A step change
+    // in size reads as a glitch; easing reads as the cell leaning forward.
+    const want = (state.hovered === n.data.id ? 1.28 : 1)
+               * (state.selected === n.data.id ? 1.1 : 1);
+    n.zoom = n.zoom === undefined ? 1 : n.zoom + (want - n.zoom) * 0.22;
+
+    const size = n.spriteSize * n.zoom;
+    const pad = n.spritePad * n.zoom;
     ctx.globalAlpha = breathe;
-    ctx.drawImage(n.sprite, n.x - n.spritePad, n.y - n.spritePad, n.spriteSize, n.spriteSize);
+    ctx.drawImage(n.sprite, n.x - pad, n.y - pad, size, size);
     ctx.globalAlpha = 1;
   }
 
   // ---- pass 3: selection and labels ---------------------------------------
   for (const n of nodes) {
+    if (state.hovered === n.data.id && state.selected !== n.data.id) {
+      const [hr, hg, hb] = COLOR[n.data.state] || COLOR.open;
+      ctx.strokeStyle = `rgba(${hr},${hg},${hb},0.7)`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r * (n.zoom || 1) + 6, 0, TAU); ctx.stroke();
+    }
     if (state.selected === n.data.id) {
       ctx.strokeStyle = 'rgba(255,255,255,0.95)';
       ctx.lineWidth = 1.6;
       ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 8, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r * (n.zoom || 1) + 8, 0, TAU); ctx.stroke();
       ctx.setLineDash([]);
     }
     if (n.r <= 9) continue;
@@ -657,18 +874,39 @@ function draw(now) {
 function frame(now) {
   step();
   draw(now);
+  // The monitor runs off the animation clock, not off snapshots: a trace that
+  // only advanced when data arrived would freeze exactly when the feed dies,
+  // which is when a heartbeat is the thing you most need to see.
+  const health = state.health || { halted: false, score: 1 };
+  stepEcg(now, health);
+  drawEcg(health);
   requestAnimationFrame(frame);
 }
 
-canvas.addEventListener('click', (event) => {
-  const rect = canvas.getBoundingClientRect();
-  const x = event.clientX - rect.left, y = event.clientY - rect.top;
+/** Nearest node under a point, or null. Shared by hover and click so the two
+ *  can never disagree about what is under the cursor. */
+function nodeAt(x, y) {
   let hit = null, best = Infinity;
   for (const node of state.neurons.values()) {
+    const reach = Math.max(node.r + 8, 12);
     const d = Math.hypot(node.x - x, node.y - y);
-    // Generous target: these are small, moving circles.
-    if (d < node.r + 8 && d < best) { best = d; hit = node; }
+    if (d < reach && d < best) { best = d; hit = node; }
   }
+  return hit;
+}
+
+canvas.addEventListener('mousemove', (event) => {
+  const rect = canvas.getBoundingClientRect();
+  const hit = nodeAt(event.clientX - rect.left, event.clientY - rect.top);
+  state.hovered = hit ? hit.data.id : null;
+  canvas.style.cursor = hit ? 'pointer' : 'crosshair';
+});
+
+canvas.addEventListener('mouseleave', () => { state.hovered = null; });
+
+canvas.addEventListener('click', (event) => {
+  const rect = canvas.getBoundingClientRect();
+  const hit = nodeAt(event.clientX - rect.left, event.clientY - rect.top);
   state.selected = hit ? hit.data.id : null;
   renderDetail(hit ? hit.data : null);
 });
@@ -745,10 +983,16 @@ function clusterOverview() {
 }
 
 function renderHealth(h) {
+  state.health = h;
   const p = Math.round(h.score * 100);
   $('l-fill').style.width = p + '%';
   $('l-head').style.left = p + '%';
   $('l-pct').textContent = p + '%';
+
+  const bpm = $('l-bpm');
+  bpm.textContent = h.halted ? '— —' : `${Math.round(ECG.bpm)} BPM`;
+  bpm.classList.toggle('flat', h.halted);
+
   const label = $('l-label');
   label.textContent = h.label;
   label.className = 'label' + (h.label === 'NOMINAL' ? ' nominal' : h.label === 'DEGRADED' ? ' degraded' : '');
@@ -967,6 +1211,7 @@ async function loadJournal() {
 }
 
 resize();
+resizeEcg();
 requestAnimationFrame(frame);
 connect();
 loadConnections();

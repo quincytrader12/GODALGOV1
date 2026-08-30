@@ -70,6 +70,11 @@ class DriverConfig:
     exhausted, which is safer than a bot that reconnects forever while holding a
     position nobody is watching."""
 
+    autopilot_poll_seconds: float = 300.0
+    """Seconds between autopilot checks. The search itself runs far less often;
+    this only controls how promptly an approved swap lands once the book is
+    flat."""
+
     decision_timeout: float = 30.0
     """Seconds a single decision may take before it is abandoned.
 
@@ -125,9 +130,11 @@ class WebSocketDriver:
         config: DriverConfig | None = None,
         *,
         exchange: object | None = None,
+        autopilot: object | None = None,
     ) -> None:
         self.engine = engine
         self.config = config or DriverConfig()
+        self.autopilot = autopilot
         self.stats = DriverStats()
         self._owns_exchange = exchange is None
 
@@ -172,6 +179,13 @@ class WebSocketDriver:
             asyncio.create_task(self._decision_loop(), name="decisions"),
             asyncio.create_task(self._watchdog_loop(), name="watchdog"),
         ]
+        if self.autopilot is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self.autopilot.run(self.config.autopilot_poll_seconds),
+                    name="autopilot",
+                )
+            )
 
         try:
             # Any task returning means a terminal condition -- a halt, or
