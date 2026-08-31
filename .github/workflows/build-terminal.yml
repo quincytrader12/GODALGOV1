@@ -34,13 +34,13 @@ jobs:
         include:
           - os: windows-latest
             label: windows-x64
-            binary: godalgo-terminal.exe
+            binary: dist/godalgo-terminal/godalgo-terminal.exe
           - os: macos-latest
             label: macos-arm64
-            binary: godalgo-terminal
+            binary: dist/godalgo-terminal/godalgo-terminal
           - os: ubuntu-latest
             label: linux-x64
-            binary: godalgo-terminal
+            binary: dist/godalgo-terminal/godalgo-terminal
 
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +76,7 @@ jobs:
         # because the static files were not bundled. Only a request catches it.
         shell: bash
         run: |
-          ./dist/${{ matrix.binary }} --demo --no-browser --port 8899 &
+          ./${{ matrix.binary }} --demo --no-browser --port 8899 &
           PID=$!
           for i in $(seq 1 40); do
             sleep 2
@@ -100,7 +100,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: godalgo-terminal-${{ matrix.label }}
-          path: dist/${{ matrix.binary }}
+          # The whole folder: a onedir build's executable needs its libraries
+          # beside it. GitHub zips artifacts anyway, so this still downloads as
+          # a single file.
+          path: dist/godalgo-terminal/
           if-no-files-found: error
           retention-days: 30
 
@@ -114,17 +117,16 @@ jobs:
         with:
           path: artifacts
 
-      - name: Name the binaries by platform
-        # Every artifact is called godalgo-terminal(.exe); flattened into one
-        # release they would collide and only the last would survive.
+      - name: Zip each platform build
+        # A onedir build is a folder, so each platform ships as one archive.
+        # Named by platform because the folder is called godalgo-terminal on
+        # every one of them and they would otherwise collide in the release.
         run: |
           mkdir -p release
-          cp artifacts/godalgo-terminal-windows-x64/godalgo-terminal.exe \
-             release/godalgo-terminal-windows-x64.exe
-          cp artifacts/godalgo-terminal-macos-arm64/godalgo-terminal \
-             release/godalgo-terminal-macos-arm64
-          cp artifacts/godalgo-terminal-linux-x64/godalgo-terminal \
-             release/godalgo-terminal-linux-x64
+          for target in windows-x64 macos-arm64 linux-x64; do
+            (cd "artifacts/godalgo-terminal-$target" \
+              && zip -qr "../../release/godalgo-terminal-$target.zip" .)
+          done
           ls -lh release
 
       - uses: softprops/action-gh-release@v2
@@ -138,13 +140,18 @@ jobs:
 
             | Platform | File |
             |---|---|
-            | Windows | `godalgo-terminal-windows-x64.exe` |
-            | macOS (Apple silicon) | `godalgo-terminal-macos-arm64` |
-            | Linux | `godalgo-terminal-linux-x64` |
+            | Windows | `godalgo-terminal-windows-x64.zip` |
+            | macOS (Apple silicon) | `godalgo-terminal-macos-arm64.zip` |
+            | Linux | `godalgo-terminal-linux-x64.zip` |
+
+            Unzip the whole folder and run the executable inside it — it needs
+            the libraries beside it. Keeping them together is what makes it
+            start in well under a second instead of unpacking 150MB on every
+            launch.
 
             ```
-            godalgo-terminal-windows-x64.exe --demo    # fabricated data, nothing traded
-            godalgo-terminal-windows-x64.exe           # attached to a real session
+            godalgo-terminal.exe --demo    # fabricated data, nothing traded
+            godalgo-terminal.exe           # attached to a real session
             ```
 
             Opens at http://127.0.0.1:8787 — loopback only, because the process

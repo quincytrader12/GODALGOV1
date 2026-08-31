@@ -575,7 +575,15 @@ function radiusFor(n, count) {
   const area = Math.max(1, W * H);
   const rMax = Math.sqrt((budget * area) / (Math.max(count, 1) * Math.PI * 9));
 
-  return Math.max(3.2, Math.min(24, base, rMax));
+  const exact = Math.max(3.2, Math.min(24, base, rMax));
+
+  // Quantised to a step. The area budget moves continuously with the position
+  // count, so without this every open or close changes every cell's radius by
+  // a fraction of a pixel and invalidates all ~100 cached sprites at once --
+  // each of which re-renders gradients, a dendritic arbour and clipped Nissl
+  // bodies. That lands as a visible freeze on exactly the frame a trade fires.
+  // Snapping means a rebuild only happens on a real size change.
+  return Math.round(exact * 2) / 2;
 }
 
 function syncNeurons(list) {
@@ -611,7 +619,13 @@ function syncNeurons(list) {
       node.sprite = null;
     }
     // State drives colour, so a close repaints the cell.
-    if (!node.sprite || node.spriteState !== data.state) buildSprite(node);
+    if (!node.sprite || node.spriteState !== data.state) {
+      // Queued rather than built here. Building inline means every stale cell
+      // is re-rendered inside one frame, which is the stall this avoids; the
+      // draw loop works through the queue a few per frame and uses a cheap
+      // placeholder in the meantime, so nothing vanishes while it catches up.
+      node.spriteDirty = true;
+    }
   }
   for (const id of [...state.neurons.keys()]) {
     if (!seen.has(id)) state.neurons.delete(id);
@@ -828,7 +842,13 @@ function draw(now) {
   // Pre-rendered sprites. Only the breathing alpha varies per frame; the
   // anatomy itself is fixed, so redrawing it would be work for no change.
   for (const n of nodes) {
-    if (!n.sprite) continue;
+    if (!n.sprite) {
+      // Cheap stand-in while this cell waits its turn in the sprite queue.
+      const [pr, pg, pb] = COLOR[n.data.state] || COLOR.open;
+      ctx.fillStyle = `rgba(${pr},${pg},${pb},0.55)`;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, TAU); ctx.fill();
+      continue;
+    }
     const breathe = n.data.is_open
       ? 0.78 + 0.22 * Math.sin(t * 1.8 + n.morph.phase)
       : 1;
@@ -871,8 +891,28 @@ function draw(now) {
   }
 }
 
+/** Rebuild a few queued sprites per frame.
+ *
+ *  A hard budget rather than "all of them": the point is that no single frame
+ *  can be made arbitrarily expensive by a burst of position changes. Six is
+ *  enough to clear a full field within a second while staying inside frame
+ *  budget on a modest machine.
+ */
+function processSpriteQueue(budget = 6) {
+  let built = 0;
+  for (const node of state.neurons.values()) {
+    if (built >= budget) break;
+    if (node.spriteDirty || !node.sprite) {
+      buildSprite(node);
+      node.spriteDirty = false;
+      built++;
+    }
+  }
+}
+
 function frame(now) {
   step();
+  processSpriteQueue();
   draw(now);
   // The monitor runs off the animation clock, not off snapshots: a trace that
   // only advanced when data arrived would freeze exactly when the feed dies,
