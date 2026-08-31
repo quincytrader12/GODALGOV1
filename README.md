@@ -213,7 +213,7 @@ The header carries a **DRY / PAPER / LIVE** switch.
 | Switch | Requires |
 |---|---|
 | dry ↔ paper | nothing |
-| → live | `GODALGO_ARM_LIVE` **and** credentials **and** typing `GO LIVE` |
+| → live | a key with **allow this key to place orders** ticked, **and** typing `GO LIVE` |
 | live → paper | nothing — reducing risk is never harder than taking it |
 
 **Every switch flattens first.** A paper position is not a real one: switching
@@ -222,10 +222,90 @@ venue has never heard of, and its next decision is sized against that fiction.
 Switching *out* of live while holding one abandons real exposure with nothing
 managing its stop. A failed flatten refuses the switch outright.
 
-**The interface can request live; it cannot authorise it.** Arming lives in the
-environment and the confirmation is checked server-side, so a mis-click or a
-compromised page cannot start trading real money. The presence of an API key is
-not consent to use it — credentials alone leave the LIVE button disabled.
+**The interface can request live; it cannot authorise it.** The confirmation is
+checked server-side, so a mis-click cannot start trading real money.
+
+**The presence of an API key is not consent to use it.** Each route to a key
+carries its own consent record, and there is no route without one:
+
+* a key added in the terminal is **read-only** until you tick *allow this key
+  to place orders* on that specific key;
+* a key supplied through `GODALGO_API_KEY` / `GODALGO_API_SECRET` still needs
+  `GODALGO_ARM_LIVE`, because there is no per-key tick to apply to it.
+
+The environment variable used to gate both routes. It was dropped from the
+terminal route only because the tick replaced it: the app ships as a
+double-clicked executable, where "export a variable first" is not friction but
+a wall, and friction the legitimate operator cannot clear is an outage rather
+than a safety feature.
+
+### Proving it works before funding anything
+
+Binance has no paper account, so the honest question — *is this actually
+talking to the exchange?* — has to be answerable without depositing. Three
+checks answer it, in increasing order of what they prove, and **none of them
+can place an order**:
+
+| Check | Needs a key? | Needs funds? | Proves |
+|---|---|---|---|
+| Reachability | no | no | The venue is up, the region is not blocked, the network path works |
+| Live price | no | no | Market data — the entire input to the strategy stack — is arriving |
+| Balance read | yes | **no** | The key, secret, signature, clock and IP allow-list all work |
+
+The last one passes on an **empty account**. A zero balance still proves the
+credential, which is the whole point.
+
+Press **Test venue connection** in the Connections panel, or just watch the
+header: the market-data poller runs from startup in every mode, using the
+public API, so live prices appear before anything is configured.
+
+For the order path itself, Binance's **Spot Testnet** is real API, real order
+lifecycle, fake money. Get keys from
+[testnet.binance.vision](https://testnet.binance.vision), add them with
+**testnet / sandbox keys** ticked, and the whole stack runs end to end without
+a deposit. A testnet key is preferred over a real one when both are permitted
+to trade — someone who set one up is mid-verification, and quietly picking
+their real-money key instead is exactly the surprise this system exists to
+avoid.
+
+### Status lamps and the activity log
+
+Four lamps in the header, deliberately not one: an unreachable venue, stale
+data, a rejected key and an unconfigured Telegram are four different problems
+needing four different actions, and sharing an indicator would hide that.
+
+| Lamp | Green when |
+|---|---|
+| `LINK` | the browser is streaming from the terminal |
+| `VENUE` | the exchange is reachable |
+| `DATA` | prices are arriving (amber if they go stale) |
+| `KEY` | a stored key passed its balance read |
+| `TG` | Telegram is connected |
+
+The **Activity** panel is the running record: every venue call, credential
+change, mode switch and failure, with the remedy rather than just the symptom.
+It exists because a bot that is working and a bot that is silently doing
+nothing look identical from the outside, and the second is the expensive case.
+
+Failures are named, not lumped together. Binance returns the same shape of
+error for a wrong secret, a drifted clock and an IP that is not on the
+allow-list, and the fix differs for each:
+
+| What you see | What it actually is |
+|---|---|
+| `ip_not_allowed` (`-2015`) | The key is fine; your public IP is not on its allow-list |
+| `clock_skew` (`-1021`) | Your PC's clock has drifted — nothing about the key will fix it |
+| `bad_signature` (`-1022`) | The secret is wrong, often a stray space |
+| `geo_blocked` (HTTP 451) | The venue refused the region; a different venue is needed |
+
+### Telegram
+
+Connect it from the Telegram panel: paste the bot token from **@BotFather** and
+your chat id from **@userinfobot**, and it sends a test message immediately —
+a settings form that accepts anything and reports nothing teaches you it worked
+when it did not. The token is stored in the same owner-only file as the
+exchange keys, is never returned over HTTP, and is never logged; the send URL
+embeds it, so failures log a status code and never a URL.
 
 ### What it shows
 
@@ -431,7 +511,7 @@ flattened the position.
 | Control | Behaviour |
 |---|---|
 | **Trading mode** | `DRY_RUN` by default — computes orders, sends nothing |
-| **Live arming** | Needs `arm=True` **and** `GODALGO_ARM_LIVE=...` **and** credentials |
+| **Live arming** | Needs `arm=True` **and** a credential explicitly permitted to trade (the per-key tick, or `GODALGO_ARM_LIVE` for an environment key) |
 | **Staleness watchdog** | Flattens if market data stops (a silent feed is worse than a bad signal) |
 | **Reconciliation** | Venue is the source of truth; drift beyond tolerance halts |
 | **Ambiguous sends** | Reported `UNKNOWN`, never "rejected" — then halt and reconcile |
@@ -442,8 +522,11 @@ flattened the position.
 | **Venue precision** | Order size and price quantised to the venue's own rules, read from `load_markets()` |
 | **Preflight** | `godalgo preflight` validates venue, credentials, symbol, limits and fees before any order |
 
-Credentials are read from the environment only, never accepted as arguments and
-never written to disk.
+Credentials come from the environment or the terminal's owner-only store
+(`~/.godalgo/credentials.json`, mode 0600 on POSIX and a user-only ACL on
+Windows, where permission bits do nothing). They are never accepted as
+positional arguments, never returned over HTTP — the API serves a masked view
+only — and never logged at any level.
 
 ## Session / overnight drift overlay
 

@@ -301,6 +301,9 @@ def client(tmp_path, monkeypatch):
     bridge = UIBridge(
         journal=TradingJournal(path=tmp_path / "j.jsonl", summary_path=tmp_path / "s.jsonl"),
         credentials=CredentialStore(directory=tmp_path),
+        # No real network call from the suite: the poller would make these
+        # tests depend on an exchange being up.
+        market_feed_enabled=False,
     )
     return TestClient(create_app(bridge)), bridge
 
@@ -388,3 +391,190 @@ def test_index_is_served(client):
     r = c.get("/")
     assert r.status_code == 200
     assert "GODALGO" in r.text
+
+
+# --- proof of life ---------------------------------------------------------
+#
+# The defect these cover: connecting an API key produced no visible change
+# anywhere in the interface, because the UI's credential store and the trading
+# path were two disconnected systems. Saving a key wrote a file nothing read.
+
+
+def test_saving_a_key_immediately_tests_it(client, monkeypatch):
+    """Saving a key and seeing nothing happen is indistinguishable from the
+    key being ignored -- which is exactly what used to happen."""
+    c, _ = client
+    _fake_venue(monkeypatch)
+
+    body = c.post("/api/connections", json={
+        "exchange_id": "binance", "api_key": "k", "api_secret": "s",
+    }).json()
+
+    assert body["ok"] is True
+    names = [check["name"] for check in body["checks"]]
+    assert names == ["reachable", "market_data", "credentials"]
+    assert all(check["ok"] for check in body["checks"])
+
+
+def test_saving_a_key_writes_to_the_event_log(client, monkeypatch):
+    c, bridge = client
+    _fake_venue(monkeypatch)
+    c.post("/api/connections", json={
+        "exchange_id": "binance", "api_key": "k", "api_secret": "s",
+    })
+
+    messages = [e["message"] for e in bridge.events.entries()]
+    assert any("added binance key" in m for m in messages)
+    assert any("verified" in m for m in messages)
+
+
+def test_a_saved_key_is_never_returned_over_http(client, monkeypatch):
+    """The whole store is served masked; the browser must never see key
+    material, in any response."""
+    c, _ = client
+    _fake_venue(monkeypatch)
+    secret = "SUPER_SECRET_VALUE_12345"
+
+    save = c.post("/api/connections", json={
+        "exchange_id": "binance", "api_key": "KEYVALUE_98765", "api_secret": secret,
+    })
+    for response in (save, c.get("/api/connections"), c.get("/api/state"),
+                     c.get("/api/events")):
+        assert secret not in response.text
+        assert "KEYVALUE_98765" not in response.text
+
+
+def test_the_read_only_venue_check_needs_no_key(client, monkeypatch):
+    """Settles 'is this actually reaching Binance' before any decision to fund."""
+    c, _ = client
+    _fake_venue(monkeypatch)
+
+    body = c.post("/api/venue/check", json={"exchange_id": "binance"}).json()
+    assert body["ok"] is True
+    assert body["credential_tested"] is False
+    assert body["checks"][1]["data"]["price"] == 64000.0
+
+
+def test_venue_failures_surface_as_events_not_errors(client, monkeypatch):
+    """A venue outage must be a red lamp, never a 500."""
+    import ccxt
+    c, bridge = client
+    _fake_venue(monkeypatch, raises={"load_markets": ccxt.NetworkError("down")})
+
+    response = c.post("/api/venue/check", json={"exchange_id": "binance"})
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert any(e["level"] == "error" for e in bridge.events.entries())
+
+
+def test_trade_permission_is_a_separate_deliberate_action(client, monkeypatch):
+    """Consent to place orders is recorded per key, and is not bundled into
+    saving one."""
+    c, bridge = client
+    _fake_venue(monkeypatch)
+    c.post("/api/connections", json={
+        "exchange_id": "binance", "api_key": "k", "api_secret": "s",
+    })
+    assert bridge.credentials.tradeable() is None
+
+    assert c.post("/api/connections/binance/trade-enabled",
+                  json={"enabled": True}).status_code == 200
+    assert bridge.credentials.tradeable() is not None
+
+    assert c.post("/api/connections/binance/trade-enabled",
+                  json={"enabled": False}).status_code == 200
+    assert bridge.credentials.tradeable() is None
+
+
+def test_events_are_carried_in_the_state_snapshot(client, monkeypatch):
+    """Carried rather than polled separately, so the log cannot drift out of
+    step with the state it describes."""
+    c, bridge = client
+    bridge.events.good("venue", "binance reachable", "1200 markets")
+
+    body = c.get("/api/state").json()
+    assert body["events"][0]["message"] == "binance reachable"
+    assert "venue" in body
+
+
+def test_the_events_endpoint_supports_incremental_reads(client):
+    c, bridge = client
+    bridge.events.info("venue", "first")
+    mark = c.get("/api/events").json()["latest"]
+    bridge.events.info("venue", "second")
+
+    body = c.get(f"/api/events?since={mark}").json()
+    assert [e["message"] for e in body["events"]] == ["second"]
+
+
+def test_telegram_is_configurable_from_the_terminal(client, monkeypatch):
+    """Environment-only was a wall for a double-clicked executable."""
+    c, bridge = client
+
+    async def fake_verify():
+        return True, "connected as @godalgo_bot"
+
+    async def fake_send(text, **kwargs):
+        return True
+
+    monkeypatch.setattr(bridge.telegram, "verify", fake_verify)
+    monkeypatch.setattr(bridge.telegram, "send", fake_send)
+
+    body = c.post("/api/telegram", json={"token": "123:ABC", "chat_id": "555"}).json()
+    assert body["ok"] is True
+    assert bridge.telegram.configured is True
+
+
+def test_the_telegram_token_never_leaves_the_process(client, monkeypatch):
+    """The send URL embeds the token, so neither it nor the URL may appear in
+    any response or event."""
+    c, bridge = client
+
+    async def fake_verify():
+        return True, "connected"
+
+    async def fake_send(text, **kwargs):
+        return True
+
+    monkeypatch.setattr(bridge.telegram, "verify", fake_verify)
+    monkeypatch.setattr(bridge.telegram, "send", fake_send)
+
+    token = "7654321:AAHtokenvalue"
+    save = c.post("/api/telegram", json={"token": token, "chat_id": "5551234"})
+    for response in (save, c.get("/api/connections"), c.get("/api/events"),
+                     c.get("/api/state")):
+        assert token not in response.text
+    # The chat id is shown only as a tail, enough to identify it.
+    assert c.get("/api/connections").json()["telegram"]["chat_id_tail"] == "1234"
+
+
+def _fake_venue(monkeypatch, *, raises=None):
+    """Point ccxt.async_support.binance at a stub, so no test needs a network."""
+    import ccxt.async_support as accxt
+
+    class _Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        async def load_markets(self):
+            if raises and "load_markets" in raises:
+                raise raises["load_markets"]
+            return {"BTC/USDT": {}}
+
+        async def fetch_ticker(self, symbol):
+            if raises and "fetch_ticker" in raises:
+                raise raises["fetch_ticker"]
+            return {"last": 64000.0, "bid": 63999.0, "ask": 64001.0}
+
+        async def fetch_balance(self):
+            if raises and "fetch_balance" in raises:
+                raise raises["fetch_balance"]
+            return {"total": {}, "free": {}}
+
+        def set_sandbox_mode(self, on):
+            pass
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(accxt, "binance", _Fake, raising=False)

@@ -126,6 +126,7 @@ class CredentialStore:
 
     directory: Path = field(default_factory=lambda: _DEFAULT_DIR)
     _credentials: dict[str, ExchangeCredential] = field(default_factory=dict, init=False)
+    _secrets: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self.directory = Path(self.directory)
@@ -152,9 +153,28 @@ class CredentialStore:
         except (json.JSONDecodeError, OSError) as exc:
             logger.error("could not read credential store: %s", type(exc).__name__)
             return
-        self._credentials = {
-            key: ExchangeCredential(**value) for key, value in raw.items()
-        }
+
+        # Version 1 was a flat mapping of label -> credential. Version 2 wraps
+        # that so non-exchange secrets can live in the same protected file.
+        # Detected by the explicit marker rather than by shape: a v1 store with
+        # a credential labelled "credentials" would otherwise be misread as v2
+        # and silently lose every key in it.
+        if raw.get("version") == 2:
+            entries = raw.get("credentials") or {}
+            self._secrets = dict(raw.get("secrets") or {})
+        else:
+            entries = raw
+            self._secrets = {}
+
+        loaded: dict[str, ExchangeCredential] = {}
+        for key, value in entries.items():
+            try:
+                loaded[key] = ExchangeCredential(**value)
+            except TypeError:
+                # One malformed entry must not cost the operator every other
+                # key in the file.
+                logger.error("skipping malformed credential entry %r", key)
+        self._credentials = loaded
 
     def save(self) -> None:
         """Write atomically with owner-only permissions from creation.
@@ -163,13 +183,17 @@ class CredentialStore:
         the data is never briefly world-readable on disk.
         """
         payload = {
-            key: {
-                "exchange_id": c.exchange_id, "api_key": c.api_key,
-                "api_secret": c.api_secret, "label": c.label,
-                "passphrase": c.passphrase, "testnet": c.testnet,
-                "trade_enabled": c.trade_enabled, "added_at": c.added_at,
-            }
-            for key, c in self._credentials.items()
+            "version": 2,
+            "credentials": {
+                key: {
+                    "exchange_id": c.exchange_id, "api_key": c.api_key,
+                    "api_secret": c.api_secret, "label": c.label,
+                    "passphrase": c.passphrase, "testnet": c.testnet,
+                    "trade_enabled": c.trade_enabled, "added_at": c.added_at,
+                }
+                for key, c in self._credentials.items()
+            },
+            "secrets": self._secrets,
         }
         temp = self.path.with_suffix(".tmp")
         # 0600 at creation on POSIX, so the file is never briefly world-readable
@@ -257,9 +281,64 @@ class CredentialStore:
             "detail": f"mode {oct(mode)}",
         }
 
+    def get_secret(self, name: str) -> dict[str, Any]:
+        """Read a non-exchange secret (currently only the Telegram config).
+
+        Kept in the same owner-only file rather than a second one: a bot token
+        needs exactly the same protection as an API key, and a second store is
+        a second set of permissions to get wrong.
+        """
+        return dict(self._secrets.get(name) or {})
+
+    def set_secret(self, name: str, value: dict[str, Any]) -> None:
+        """Write a non-exchange secret, or clear it with an empty mapping."""
+        if value:
+            self._secrets[name] = dict(value)
+        else:
+            self._secrets.pop(name, None)
+        self.save()
+        # The name only. Never the value, at any level.
+        logger.info("stored secret %r", name)
+
+    def items(self) -> list[tuple[str, ExchangeCredential]]:
+        """Stored credentials with their keys. For internal callers only."""
+        return list(self._credentials.items())
+
+    def tradeable(self) -> ExchangeCredential | None:
+        """The credential live trading should use, or None.
+
+        A credential qualifies only if the operator ticked 'allow this key to
+        place orders' on it. That tick is the whole consent record, so it is
+        checked here rather than inferred from a key merely existing.
+
+        When several qualify, a testnet key wins. That looks arbitrary and is
+        not: someone who has set up a testnet key is mid-verification, and
+        quietly picking their real-money key instead is the exact surprise this
+        system exists to avoid.
+        """
+        enabled = [c for c in self._credentials.values() if c.trade_enabled]
+        if not enabled:
+            return None
+        return next((c for c in enabled if c.testnet), enabled[0])
+
+    def first_for(self, exchange_id: str) -> ExchangeCredential | None:
+        """Any stored credential for a venue, trade-enabled or not.
+
+        Used for read-only probes, where the trade permission is irrelevant --
+        a read-only key must still be testable, or the operator has no way to
+        find out it works.
+        """
+        return next(
+            (c for c in self._credentials.values() if c.exchange_id == exchange_id),
+            None,
+        )
+
     def listing(self) -> list[dict[str, Any]]:
         """Masked view of every stored credential. Safe to serve."""
-        return [c.masked() for c in self._credentials.values()]
+        return [
+            {"key": key, **credential.masked()}
+            for key, credential in self._credentials.items()
+        ]
 
     def __len__(self) -> int:
         return len(self._credentials)

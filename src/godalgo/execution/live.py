@@ -21,11 +21,12 @@ back, never inferred from our own order history.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Self
+from typing import Any, Self
 
 import ccxt.async_support as ccxt_async
 
@@ -45,8 +46,6 @@ __all__ = ["ArmingError", "LiveBroker", "LiveBrokerConfig"]
 
 logger = logging.getLogger(__name__)
 
-_ARM_ENV_VAR = "GODALGO_ARM_LIVE"
-_ARM_TOKEN = "I_UNDERSTAND_THIS_TRADES_REAL_MONEY"
 
 _STATUS_MAP = {
     "open": OrderStatus.OPEN,
@@ -66,8 +65,9 @@ class ArmingError(RuntimeError):
 class LiveBrokerConfig:
     """Venue and safety configuration.
 
-    Credentials are read from the environment, never accepted as arguments and
-    never written to disk -- a config object that holds secrets ends up in a log
+    Credentials are never held here. They are resolved at construction from
+    the environment or the owner-only credential store, and passed straight to
+    the venue client -- a config object that holds secrets ends up in a log
     line or a stack trace sooner or later.
     """
 
@@ -89,46 +89,90 @@ class LiveBrokerConfig:
 class LiveBroker(Broker):
     """ccxt-backed live broker. Requires explicit arming to construct.
 
-    Arming is a two-key operation: ``arm=True`` passed in code *and* the
-    environment variable ``GODALGO_ARM_LIVE`` set to the exact token. Either
-    alone is insufficient. This is deliberate friction -- it makes live trading
-    something you cannot reach by editing one line or by a stale config file
-    surviving into production.
+    Arming needs ``arm=True`` in code plus a credential the operator has
+    explicitly marked as permitted to trade. Neither alone is sufficient, and
+    the presence of a key is never treated as consent on its own -- a key added
+    to read market data must not become an order-placing key because a mode
+    switch happened to find it.
+
+    Credentials resolve from, in order:
+
+    1. ``credential``, passed by the caller (the UI's stored, trade-enabled key)
+    2. ``GODALGO_API_KEY`` / ``GODALGO_API_SECRET`` in the environment
+
+    The environment is checked second rather than first so that what the
+    operator selected in the interface wins over a stale shell variable.
     """
 
-    def __init__(self, config: LiveBrokerConfig | None = None, *, arm: bool = False) -> None:
+    def __init__(
+        self,
+        config: LiveBrokerConfig | None = None,
+        *,
+        arm: bool = False,
+        credential: Any = None,
+    ) -> None:
         self.config = config or LiveBrokerConfig()
 
         if not arm:
             raise ArmingError(
                 "LiveBroker requires arm=True. Use DryRunBroker or PaperBroker instead."
             )
-        if os.environ.get(_ARM_ENV_VAR) != _ARM_TOKEN:
-            raise ArmingError(
-                f"live trading requires {_ARM_ENV_VAR}={_ARM_TOKEN} in the environment"
-            )
 
-        key = os.environ.get(self.config.api_key_env)
-        secret = os.environ.get(self.config.api_secret_env)
+        key, secret, passphrase, testnet = self._resolve(credential)
         if not key or not secret:
             raise ArmingError(
-                f"missing credentials: set {self.config.api_key_env} and "
-                f"{self.config.api_secret_env}"
+                "no credential permitted to trade. Add an exchange key in the "
+                "terminal and tick 'allow this key to place orders', or set "
+                f"{self.config.api_key_env} and {self.config.api_secret_env}."
             )
+
+        if credential is not None and getattr(credential, "exchange_id", None):
+            self.config = replace(self.config, exchange_id=credential.exchange_id)
 
         klass = getattr(ccxt_async, self.config.exchange_id)
         self._exchange = klass(
             {
                 "apiKey": key,
                 "secret": secret,
+                "password": passphrase or None,
                 "enableRateLimit": True,
                 "timeout": self.config.request_timeout_ms,
                 "options": {"defaultType": self.config.symbol_type},
             }
         )
+        self.testnet = testnet
+        if testnet:
+            # The venue's test network: real API and real order lifecycle,
+            # fake money. Exercising the order path without funding anything is
+            # the whole reason this flag is plumbed through.
+            with contextlib.suppress(Exception):
+                self._exchange.set_sandbox_mode(True)
         logger.warning(
-            "LiveBroker ARMED on %s (%s) -- orders will use real funds",
+            "LiveBroker ARMED on %s (%s) -- orders will use %s",
             self.config.exchange_id, self.config.symbol_type,
+            "TESTNET funds" if testnet else "real funds",
+        )
+
+    def _resolve(self, credential: Any) -> tuple[str, str, str, bool]:
+        """Pick the credential to trade with, without logging any of it."""
+        if credential is not None:
+            if not getattr(credential, "trade_enabled", False):
+                raise ArmingError(
+                    f"the {getattr(credential, 'exchange_id', 'selected')} key is "
+                    "stored for reading only. Tick 'allow this key to place "
+                    "orders' on it before switching to live."
+                )
+            return (
+                getattr(credential, "api_key", ""),
+                getattr(credential, "api_secret", ""),
+                getattr(credential, "passphrase", "") or "",
+                bool(getattr(credential, "testnet", False)),
+            )
+        return (
+            os.environ.get(self.config.api_key_env) or "",
+            os.environ.get(self.config.api_secret_env) or "",
+            "",
+            False,
         )
 
     async def load_market(self, symbol: str) -> MarketSpec:

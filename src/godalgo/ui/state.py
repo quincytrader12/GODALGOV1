@@ -390,6 +390,13 @@ class UISnapshot:
     conviction: float = 0.0
     target_weight: float = 0.0
     current_weight: float = 0.0
+    last_price: float = 0.0
+    venue: dict[str, Any] = field(default_factory=dict)
+    """Per-check connection state, rendered as the status lamps."""
+
+    events: list[dict[str, Any]] = field(default_factory=list)
+    """Most recent activity. Carried in the snapshot rather than polled
+    separately so the log cannot drift out of step with what it describes."""
 
     def to_dict(self) -> dict[str, Any]:
         pf = self.profit_factor
@@ -422,5 +429,8 @@ class UISnapshot:
                 "conviction": round(self.conviction, 4),
                 "target_weight": round(self.target_weight, 5),
                 "current_weight": round(self.current_weight, 5),
+                "last_price": round(self.last_price, 8),
             },
+            "venue": self.venue,
+            "events": self.events,
         }

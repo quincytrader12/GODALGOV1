@@ -1147,29 +1147,123 @@ document.querySelectorAll('.tabs button').forEach((btn) => {
 
 /* -------------------------------------------------------- connections */
 
+function escapeHtml(value) {
+  // Exchange ids and labels are operator input and go into innerHTML. Not a
+  // remote attacker path -- the server is loopback-only -- but a label with an
+  // angle bracket would silently corrupt the panel.
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+/* Per-connection check results, keyed by connection. Kept out of the snapshot
+   because they are the outcome of a button press, not continuous state. */
+const checkResults = new Map();
+
+function renderCheck(key) {
+  const result = checkResults.get(key);
+  if (!result) return '';
+  if (result.pending) return '<div class="conn-check">checking…</div>';
+  const cls = result.ok ? 'ok' : 'bad';
+  return `<div class="conn-check ${cls}">${escapeHtml(result.text)}</div>`;
+}
+
 async function loadConnections() {
   const r = await fetch('/api/connections');
   const data = await r.json();
   $('k-path').textContent = data.store_path;
   $('k-count').textContent = data.exchanges.length;
   $('j-tg').textContent = 'telegram: ' + (data.telegram.configured ? 'linked' : 'not set');
+  renderTelegram(data.telegram);
 
   $('k-list').innerHTML = data.exchanges.length
-    ? data.exchanges.map((e) => `
+    ? data.exchanges.map((e) => {
+        const key = escapeHtml(e.key);
+        return `
         <div class="conn">
           <span class="dot ${e.trade_enabled ? 'on' : ''}"></span>
-          <span class="name">${e.label}</span>
-          <span class="key">${e.api_key_masked}</span>
-          <button data-key="${e.label}">×</button>
-        </div>`).join('')
+          <span class="name">${escapeHtml(e.label)}${e.testnet ? ' <i>testnet</i>' : ''}</span>
+          <span class="key">${escapeHtml(e.api_key_masked)}</span>
+          <button data-remove="${key}" title="remove">×</button>
+          <div class="conn-actions">
+            <button data-test="${key}">TEST</button>
+            <button data-arm="${key}" class="${e.trade_enabled ? 'armed' : ''}">
+              ${e.trade_enabled ? 'CAN TRADE' : 'READ ONLY'}
+            </button>
+          </div>
+          ${renderCheck(e.key)}
+        </div>`;
+      }).join('')
     : '<div class="empty">NO CONNECTIONS</div>';
 
-  $('k-list').querySelectorAll('button').forEach((b) =>
+  $('k-list').querySelectorAll('[data-remove]').forEach((b) =>
     b.addEventListener('click', async () => {
-      await fetch('/api/connections/' + encodeURIComponent(b.dataset.key), { method: 'DELETE' });
+      await fetch('/api/connections/' + encodeURIComponent(b.dataset.remove), { method: 'DELETE' });
+      checkResults.delete(b.dataset.remove);
       loadConnections();
     }));
+
+  $('k-list').querySelectorAll('[data-test]').forEach((b) =>
+    b.addEventListener('click', () => testConnection(b.dataset.test)));
+
+  // Toggling order permission is the consent record the live switch reads, so
+  // granting it asks and revoking it does not. Reducing risk is never gated.
+  $('k-list').querySelectorAll('[data-arm]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const key = b.dataset.arm;
+      const enabling = !b.classList.contains('armed');
+      if (enabling && !confirm(
+        'Allow this key to place real orders?\n\n'
+        + 'This is what the LIVE switch checks. Nothing trades until you also '
+        + 'switch to live and type the confirmation phrase.')) return;
+      await fetch(`/api/connections/${encodeURIComponent(key)}/trade-enabled`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: enabling }),
+      });
+      loadConnections();
+      refreshMode();
+    }));
 }
+
+function summariseChecks(checks) {
+  return checks.map((c) => `${c.ok ? '✓' : '✗'} ${c.name.replace('_', ' ')}: ${c.detail}`)
+    .join('\n');
+}
+
+async function testConnection(key) {
+  checkResults.set(key, { pending: true });
+  loadConnections();
+  setLamp('lamp-key', 'busy');
+  try {
+    const r = await fetch(`/api/connections/${encodeURIComponent(key)}/test`, { method: 'POST' });
+    const d = await r.json();
+    checkResults.set(key, { ok: d.ok, text: summariseChecks(d.checks || []) });
+  } catch (err) {
+    checkResults.set(key, { ok: false, text: 'the terminal could not run the check' });
+  }
+  loadConnections();
+}
+
+$('k-check').addEventListener('click', async () => {
+  const msg = $('k-msg');
+  msg.className = 'note';
+  msg.textContent = 'checking…';
+  ['lamp-venue', 'lamp-data'].forEach((id) => setLamp(id, 'busy'));
+  try {
+    const r = await fetch('/api/venue/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'binance' }),
+    });
+    const d = await r.json();
+    msg.className = 'note ' + (d.ok ? 'ok' : 'warn');
+    msg.textContent = summariseChecks(d.checks || []);
+  } catch (err) {
+    msg.className = 'note warn';
+    msg.textContent = 'the terminal could not reach its own API';
+  }
+});
 
 $('k-add').addEventListener('click', async () => {
   const payload = {
@@ -1178,37 +1272,173 @@ $('k-add').addEventListener('click', async () => {
     api_key: $('k-key').value,
     api_secret: $('k-secret').value,
     passphrase: $('k-pass').value,
+    testnet: $('k-testnet').checked,
     trade_enabled: $('k-trade').checked,
   };
+  const msg = $('k-msg');
+  msg.className = 'note';
+  msg.textContent = 'storing and testing…';
+
   const r = await fetch('/api/connections', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const msg = $('k-msg');
   if (r.ok) {
     // Clear the secret fields immediately: no reason for key material to sit
     // in the DOM after it has been stored.
     ['k-key', 'k-secret', 'k-pass'].forEach((id) => ($(id).value = ''));
-    msg.textContent = 'stored';
+    const d = await r.json();
+    const ok = (d.checks || []).every((c) => c.ok);
+    msg.className = 'note ' + (ok ? 'ok' : 'warn');
+    msg.textContent = summariseChecks(d.checks || []) || 'stored';
     loadConnections();
+    refreshMode();
   } else {
+    msg.className = 'note warn';
     msg.textContent = (await r.json()).detail || 'failed';
   }
 });
 
-$('k-tg').addEventListener('click', async () => {
-  const r = await fetch('/api/telegram/test', { method: 'POST' });
-  $('k-msg').textContent = (await r.json()).message;
+/* ---------------------------------------------------------- telegram */
+
+function renderTelegram(status) {
+  const state = $('t-state');
+  if (!status) return;
+  state.textContent = status.configured
+    ? `linked · chat …${status.chat_id_tail || ''}`
+    : 'not connected';
+  state.className = 'meta';
+  setLamp('lamp-tg', status.configured ? 'ok' : 'off');
+}
+
+$('t-save').addEventListener('click', async () => {
+  const msg = $('t-msg');
+  msg.className = 'note';
+  msg.textContent = 'connecting…';
+  const r = await fetch('/api/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token: $('t-token').value.trim(),
+      chat_id: $('t-chat').value.trim(),
+    }),
+  });
+  const d = await r.json().catch(() => ({}));
+  // The token leaves the DOM whether or not it worked.
+  $('t-token').value = '';
+  msg.className = 'note ' + (d.ok ? 'ok' : 'warn');
+  msg.textContent = d.message || d.detail || 'failed';
+  loadConnections();
 });
 
-$('k-digest').addEventListener('click', async () => {
+$('t-test').addEventListener('click', async () => {
+  const r = await fetch('/api/telegram/test', { method: 'POST' });
+  const d = await r.json();
+  $('t-msg').className = 'note ' + (d.ok ? 'ok' : 'warn');
+  $('t-msg').textContent = d.message;
+});
+
+$('t-digest').addEventListener('click', async () => {
   const r = await fetch('/api/telegram/digest', { method: 'POST' });
   const d = await r.json();
-  $('k-msg').textContent = d.ok ? 'digest sent' : 'telegram not configured';
+  $('t-msg').className = 'note ' + (d.ok ? 'ok' : 'warn');
+  $('t-msg').textContent = d.ok ? 'digest sent' : 'telegram not configured';
 });
 
 /* ------------------------------------------------------------ stream */
+
+/* ------------------------------------------------- lamps and activity */
+
+function setLamp(id, state, title) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.remove('ok', 'warn', 'bad', 'busy');
+  if (state && state !== 'off') el.classList.add(state);
+  if (title) el.title = title;
+}
+
+function renderLamps(snap) {
+  const venue = (snap.venue || {});
+  const reachable = venue.reachable;
+  const data = venue.market_data;
+  const credentials = venue.credentials;
+
+  setLamp('lamp-venue',
+    reachable === undefined ? 'off' : (reachable.ok ? 'ok' : 'bad'),
+    reachable === undefined ? 'not checked yet' : (reachable.detail || ''));
+
+  // Data is amber rather than green when it has gone stale: a socket that is
+  // technically open but delivering nothing is the failure this catches, and
+  // it looks identical to a healthy one without an age check.
+  let dataState = 'off';
+  let dataTitle = 'no market data yet';
+  if (data !== undefined) {
+    const age = snap.health ? snap.health.data_age_seconds : 1e9;
+    dataState = !data.ok ? 'bad' : (age > 60 ? 'warn' : 'ok');
+    dataTitle = data.ok
+      ? `${data.detail || ''} (${age < 1e8 ? Math.round(age) + 's ago' : 'stale'})`
+      : (data.detail || '');
+  }
+  setLamp('lamp-data', dataState, dataTitle);
+
+  setLamp('lamp-key',
+    credentials === undefined ? 'off' : (credentials.ok ? 'ok' : 'bad'),
+    credentials === undefined
+      ? 'no key tested yet — the bot can still read public market data'
+      : (credentials.detail || ''));
+
+  const price = snap.brain ? snap.brain.last_price : 0;
+  $('h-price').textContent = price
+    ? price.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : '—';
+}
+
+let eventFilter = 'all';
+let lastEventSeq = -1;
+
+document.querySelectorAll('#e-filters button').forEach((b) =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#e-filters button').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    eventFilter = b.dataset.level;
+    lastEventSeq = -1;  // force a redraw under the new filter
+    renderEvents(lastEvents);
+  }));
+
+let lastEvents = [];
+
+function renderEvents(events) {
+  if (!events) return;
+  lastEvents = events;
+
+  const shown = eventFilter === 'warn'
+    ? events.filter((e) => e.level === 'warn' || e.level === 'error')
+    : events;
+
+  const counts = events.reduce((acc, e) => {
+    acc[e.level] = (acc[e.level] || 0) + 1;
+    return acc;
+  }, {});
+  const problems = (counts.warn || 0) + (counts.error || 0);
+  $('e-count').textContent = problems ? `${problems} issue(s)` : `${events.length} events`;
+
+  // Rebuild only when the newest event changes. The snapshot arrives once a
+  // second; re-rendering an unchanged list would drop the user's scroll
+  // position every time and make the panel unreadable.
+  const newest = shown.length ? shown[0].sequence : 0;
+  if (newest === lastEventSeq) return;
+  lastEventSeq = newest;
+
+  $('e-list').innerHTML = shown.length
+    ? shown.map((e) => `
+        <div class="event ${e.level}">
+          <span class="t">${e.at.slice(11, 19)}</span>
+          <span class="m"><span class="c">${escapeHtml(e.category)}</span>${escapeHtml(e.message)}</span>
+          ${e.detail ? `<span class="d">${escapeHtml(e.detail)}</span>` : ''}
+        </div>`).join('')
+    : '<div class="empty">NOTHING TO REPORT</div>';
+}
 
 function apply(snap) {
   state.lastTotal = snap.pnl.total_count;
@@ -1216,6 +1446,8 @@ function apply(snap) {
   renderHealth(snap.health);
   renderPnl(snap.pnl);
   renderBrain(snap.brain, snap.health);
+  renderEvents(snap.events);
+  renderLamps(snap);
 
   state.equityHistory.push(snap.pnl.equity);
   if (state.equityHistory.length > 400) state.equityHistory.shift();
@@ -1231,11 +1463,11 @@ function apply(snap) {
 
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { state.connected = true; $('h-link').textContent = 'LIVE'; };
+  ws.onopen = () => { state.connected = true; setLamp('h-link', 'ok', 'streaming from the terminal'); };
   ws.onmessage = (e) => apply(JSON.parse(e.data));
   ws.onclose = () => {
     state.connected = false;
-    $('h-link').textContent = 'RECONNECTING';
+    setLamp('h-link', 'busy', 'reconnecting to the terminal');
     // The server is local; a drop usually means it restarted. Retry steadily
     // rather than backing off, so the page recovers as soon as it returns.
     setTimeout(connect, 1500);
@@ -1268,7 +1500,10 @@ setInterval(loadJournal, 15000);
  * own. Everything here is presentation over a decision made elsewhere.
  */
 
-const modeState = { available: false, mode: 'dry_run', liveArmed: false, liveAvailable: false };
+const modeState = {
+  available: false, mode: 'dry_run', liveArmed: false, liveAvailable: false,
+  blockers: [], source: null, testnet: false,
+};
 
 async function loadMode() {
   try {
@@ -1278,10 +1513,15 @@ async function loadMode() {
     modeState.mode = d.mode || 'dry_run';
     modeState.liveArmed = !!d.live_armed;
     modeState.liveAvailable = !!d.live_available;
+    modeState.blockers = d.live_blockers || [];
+    modeState.source = d.live_source || null;
+    modeState.testnet = !!d.live_testnet;
     if (d.confirm_phrase) $('live-phrase').textContent = d.confirm_phrase;
     renderMode();
   } catch { /* server not up yet */ }
 }
+
+const refreshMode = loadMode;
 
 function renderMode() {
   document.querySelectorAll('#mode-switch button').forEach((b) => {
@@ -1290,8 +1530,10 @@ function renderMode() {
     // button that silently does nothing is worse than one that says it cannot.
     b.disabled = !modeState.available
       || (b.dataset.mode === 'live' && !modeState.liveAvailable);
+    // The tooltip names the remedy rather than the state. "Unavailable" on its
+    // own sends people to re-paste keys that were never the problem.
     b.title = b.dataset.mode === 'live' && !modeState.liveAvailable
-      ? 'live requires GODALGO_ARM_LIVE and API credentials in the environment'
+      ? (modeState.blockers[0] || 'live is not available yet')
       : '';
   });
 }
@@ -1327,8 +1569,12 @@ function openLiveModal() {
   $('live-error').textContent = '';
   $('live-confirm').value = '';
   $('live-checks').innerHTML = `
-    <dt>armed</dt><dd class="${modeState.liveArmed ? 'pos' : 'neg'}">${modeState.liveArmed ? 'yes' : 'no'}</dd>
-    <dt>credentials</dt><dd class="${modeState.liveAvailable ? 'pos' : 'neg'}">${modeState.liveAvailable ? 'present' : 'missing'}</dd>
+    <dt>key</dt><dd class="${modeState.liveAvailable ? 'pos' : 'neg'}">${
+      modeState.liveAvailable
+        ? escapeHtml(modeState.source || 'permitted to trade')
+        : escapeHtml(modeState.blockers[0] || 'none permitted to trade')}</dd>
+    <dt>funds</dt><dd class="${modeState.testnet ? 'amber' : 'neg'}">${
+      modeState.testnet ? 'TESTNET — fake money' : 'REAL money'}</dd>
     <dt>on switch</dt><dd class="amber">all positions closed first</dd>`;
   modal.hidden = false;
   $('live-confirm').focus();

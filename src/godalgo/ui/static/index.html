@@ -19,8 +19,15 @@
     <span class="stat"><span class="k">TARGET</span><span class="v" id="h-target">—</span></span>
     <span class="stat"><span class="k">EQUITY</span><span class="v" id="h-equity">—</span></span>
     <span class="stat"><span class="k">P&amp;L</span><span class="v" id="h-pnl">—</span></span>
+    <span class="stat"><span class="k">LAST</span><span class="v" id="h-price">—</span></span>
     <span class="spacer"></span>
-    <span class="stat"><span class="k">LINK</span><span class="v" id="h-link">…</span></span>
+    <div class="lamps" id="lamps">
+      <span class="lamp" id="h-link"      title="browser to terminal"><i></i>LINK</span>
+      <span class="lamp" id="lamp-venue"  title="venue reachability"><i></i>VENUE</span>
+      <span class="lamp" id="lamp-data"   title="live market data"><i></i>DATA</span>
+      <span class="lamp" id="lamp-key"    title="exchange credentials"><i></i>KEY</span>
+      <span class="lamp" id="lamp-tg"     title="telegram"><i></i>TG</span>
+    </div>
     <div class="mode-switch" id="mode-switch">
       <button data-mode="dry_run">DRY</button>
       <button data-mode="paper">PAPER</button>
@@ -97,6 +104,21 @@
       </div>
       <div class="scroll" id="j-list"><div class="empty">NO ENTRIES</div></div>
     </div>
+
+    <div id="activity" class="panel">
+      <div class="panel-title">
+        <span>Activity</span>
+        <span class="spacer"></span>
+        <span class="filters" id="e-filters">
+          <button class="on" data-level="all">ALL</button>
+          <button data-level="warn">ISSUES</button>
+        </span>
+        <span class="meta" id="e-count">—</span>
+      </div>
+      <div class="scroll" id="e-list">
+        <div class="empty">WAITING FOR ACTIVITY</div>
+      </div>
+    </div>
   </div>
 
   <!-- ── rail ─────────────────────────────────────────────── -->
@@ -127,20 +149,49 @@
       <div class="scroll">
         <div class="conn-list" id="k-list"></div>
         <div class="form">
+          <button class="ghost wide" id="k-check">Test venue connection</button>
+          <p class="note">Reads only — reachability, a live price, and your
+             balance. No order is placed and no funds are needed.</p>
+
           <div class="pair">
-            <input type="text" id="k-ex"    placeholder="exchange id" autocomplete="off">
+            <input type="text" id="k-ex"    placeholder="exchange id" autocomplete="off" value="binance">
             <input type="text" id="k-label" placeholder="label" autocomplete="off">
           </div>
           <input type="password" id="k-key"    placeholder="api key"    autocomplete="off">
           <input type="password" id="k-secret" placeholder="api secret" autocomplete="off">
           <input type="password" id="k-pass"   placeholder="passphrase (optional)" autocomplete="off">
+          <label><input type="checkbox" id="k-testnet"> testnet / sandbox keys</label>
           <label><input type="checkbox" id="k-trade"> allow this key to place orders</label>
-          <button id="k-add">Add connection</button>
-          <button class="ghost" id="k-tg">Test telegram</button>
-          <button class="ghost" id="k-digest">Send digest now</button>
+          <button id="k-add">Add &amp; test connection</button>
           <p class="note">Keys are stored at <code id="k-path">~/.godalgo/credentials.json</code>
              with owner-only permissions and are never sent back to this page.</p>
           <p class="note warn" id="k-msg"></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="telegram" class="panel">
+      <div class="panel-title"><span>Telegram</span><span class="spacer"></span>
+        <span class="meta" id="t-state">not connected</span></div>
+      <div class="scroll">
+        <div class="form">
+          <input type="password" id="t-token" placeholder="bot token from @BotFather" autocomplete="off">
+          <input type="text" id="t-chat" placeholder="chat id" autocomplete="off">
+          <button id="t-save">Connect telegram</button>
+          <div class="pair">
+            <button class="ghost" id="t-test">Send test</button>
+            <button class="ghost" id="t-digest">Send digest</button>
+          </div>
+          <details class="help">
+            <summary>How to get these</summary>
+            <ol>
+              <li>Message <b>@BotFather</b> on Telegram, send <code>/newbot</code>,
+                  and copy the token it gives you.</li>
+              <li>Send any message to your new bot.</li>
+              <li>Message <b>@userinfobot</b> to get your chat id.</li>
+            </ol>
+          </details>
+          <p class="note warn" id="t-msg"></p>
         </div>
       </div>
     </div>

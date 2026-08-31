@@ -13,14 +13,31 @@ venue has never heard of, and its next decision is sized against that fiction.
 Switching *out* of live while holding one abandons real exposure with nothing
 managing its stop. Flattening is the only state from which both brokers agree.
 
-**Live needs more than a click.** The arming token must be present in the
-environment *and* the caller must confirm explicitly. A UI button that arms real
-money on one click is a UI button that arms real money by accident. Dropping
-back to paper needs neither -- reducing risk should never be harder than taking
-it.
+**Live needs more than a click.** Two independent things must hold: a stored
+credential the operator explicitly marked as permitted to place orders, and a
+typed confirmation phrase. A UI button that arms real money on one click is a
+UI button that arms real money by accident. Dropping back to paper needs
+neither -- reducing risk should never be harder than taking it.
 
-**Nothing is inferred.** Credentials being present does not mean live is wanted.
-The presence of an API key is not consent.
+There are two ways to supply a key, and **each carries its own consent
+record**:
+
+* From the terminal, consent is the ``trade_enabled`` flag ticked on that
+  specific key. A key added to read market data stays read-only.
+* From the environment, there is no per-key flag to tick, so the arming
+  variable ``GODALGO_ARM_LIVE`` remains that path's consent record.
+
+The environment gate used to apply to *both* paths, and that was wrong for the
+UI one: the terminal ships as a double-clicked executable, where "set an
+environment variable first" is not friction but a wall. Friction the legitimate
+operator cannot clear is not a safety feature -- it is an outage, and it pushes
+people towards running the bot in ways nobody designed. Removing it there was
+only defensible because the tick replaced it; the env path kept the variable
+because nothing replaced it.
+
+**Nothing is inferred.** Credentials being present does not mean live is
+wanted. The presence of an API key is not consent -- a key added to read market
+data stays read-only until someone ticks the box on that key.
 """
 
 from __future__ import annotations
@@ -85,6 +102,14 @@ class ModeController:
     equity: float = 10_000.0
     on_broker_change: Callable[[Broker], None] | None = None
     flatten: Callable[[], object] | None = None
+    tradeable_credential: Callable[[], object | None] | None = None
+    """Returns the stored credential permitted to place orders, or None.
+
+    Supplied by the caller rather than read here, because the controller must
+    not depend on the UI's storage layer -- a headless run has no credential
+    store and must still be able to go live from the environment.
+    """
+
     history: list[ModeChange] = field(default_factory=list)
     _broker: Broker | None = field(default=None, init=False)
 
@@ -99,26 +124,81 @@ class ModeController:
 
     # -- capability reporting ---------------------------------------------
 
+    def _credential(self) -> object | None:
+        """The credential live would trade with, if any."""
+        if self.tradeable_credential is None:
+            return None
+        try:
+            return self.tradeable_credential()
+        except Exception:
+            logger.exception("could not read the credential store")
+            return None
+
     @property
     def live_armed(self) -> bool:
-        """Whether the environment permits live trading at all."""
-        return os.environ.get(_ARM_ENV_VAR) == _ARM_TOKEN
+        """Whether a consented credential exists by either route."""
+        return self._credential() is not None or self._env_armed()
 
     def status(self) -> dict[str, object]:
-        """Mode state for the UI. Contains no secret material."""
+        """Mode state for the UI. Contains no secret material.
+
+        ``live_blockers`` is the substance. An unavailable live switch has to
+        say *which* requirement is missing: "unavailable" on its own sends
+        people to re-paste keys that were never the problem.
+        """
+        credential = self._credential()
+        env_armed = self._env_armed()
+
+        blockers: list[str] = []
+        source: str | None = None
+        testnet = False
+
+        if credential is not None:
+            source = getattr(credential, "exchange_id", None)
+            testnet = bool(getattr(credential, "testnet", False))
+        elif env_armed:
+            source = "environment"
+        elif self._env_credentials_present():
+            # A key is there but nobody said it may trade. Naming the exact
+            # remedy matters: this is the state an operator lands in after
+            # exporting credentials and expecting that to be enough.
+            blockers.append(
+                f"credentials are in the environment but {_ARM_ENV_VAR} is not "
+                "set; or add the key in the terminal and tick 'allow this key "
+                "to place orders'"
+            )
+        else:
+            blockers.append(
+                "no exchange key is marked 'allow this key to place orders'"
+            )
+
         return {
             "mode": self.mode.value,
-            "live_armed": self.live_armed,
-            "live_available": self.live_armed and self._credentials_present(),
+            "live_armed": not blockers,
+            "live_available": not blockers,
+            "live_blockers": blockers,
+            "live_source": source,
+            "live_testnet": testnet,
             "confirm_phrase": _CONFIRM_PHRASE,
-            "arm_env_var": _ARM_ENV_VAR,
             "history": [c.to_dict() for c in self.history[-10:]],
         }
 
     @staticmethod
-    def _credentials_present() -> bool:
+    def _env_credentials_present() -> bool:
         return bool(
             os.environ.get("GODALGO_API_KEY") and os.environ.get("GODALGO_API_SECRET")
+        )
+
+    @classmethod
+    def _env_armed(cls) -> bool:
+        """The environment path's consent record: credentials *and* the token.
+
+        Both, because a key sitting in a shell profile is not a decision to
+        trade with it.
+        """
+        return (
+            cls._env_credentials_present()
+            and os.environ.get(_ARM_ENV_VAR) == _ARM_TOKEN
         )
 
     # -- switching ---------------------------------------------------------
@@ -176,14 +256,16 @@ class ModeController:
         return change
 
     def _assert_live_permitted(self, confirm: str | None) -> None:
-        if not self.live_armed:
+        if self._credential() is None and not self._env_armed():
+            if self._env_credentials_present():
+                raise ModeSwitchError(
+                    f"credentials are present but not armed: set {_ARM_ENV_VAR}="
+                    f"{_ARM_TOKEN}, or add the key in the terminal and tick "
+                    "'allow this key to place orders'"
+                )
             raise ModeSwitchError(
-                f"live trading requires {_ARM_ENV_VAR}={_ARM_TOKEN} in the "
-                "environment; it cannot be enabled from the interface"
-            )
-        if not self._credentials_present():
-            raise ModeSwitchError(
-                "live trading requires GODALGO_API_KEY and GODALGO_API_SECRET"
+                "no exchange key is permitted to place orders. Add a key in the "
+                "terminal and tick 'allow this key to place orders' on it."
             )
         if (confirm or "").strip().upper() != _CONFIRM_PHRASE:
             raise ModeSwitchError(
@@ -194,9 +276,9 @@ class ModeController:
         if mode is TradingMode.LIVE:
             from godalgo.execution.live import LiveBroker
 
-            # LiveBroker re-checks arming itself. Two independent checks on the
-            # one irreversible path is deliberate.
-            return LiveBroker(arm=True)
+            # LiveBroker re-checks the credential's trade permission itself.
+            # Two independent checks on the one irreversible path is deliberate.
+            return LiveBroker(arm=True, credential=self._credential())
         if mode is TradingMode.PAPER:
             return PaperBroker(starting_equity=self.equity)
         return DryRunBroker(starting_equity=self.equity)

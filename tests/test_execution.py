@@ -244,9 +244,11 @@ def test_live_broker_refuses_without_explicit_arming(monkeypatch):
     from godalgo.execution.live import ArmingError, LiveBroker
 
     monkeypatch.delenv("GODALGO_ARM_LIVE", raising=False)
+    monkeypatch.delenv("GODALGO_API_KEY", raising=False)
+    monkeypatch.delenv("GODALGO_API_SECRET", raising=False)
     with pytest.raises(ArmingError, match="arm=True"):
         LiveBroker()
-    with pytest.raises(ArmingError, match="GODALGO_ARM_LIVE"):
+    with pytest.raises(ArmingError, match="no credential permitted to trade"):
         LiveBroker(arm=True)
 
 
@@ -256,7 +258,7 @@ def test_live_broker_refuses_without_credentials(monkeypatch):
     monkeypatch.setenv("GODALGO_ARM_LIVE", "I_UNDERSTAND_THIS_TRADES_REAL_MONEY")
     monkeypatch.delenv("GODALGO_API_KEY", raising=False)
     monkeypatch.delenv("GODALGO_API_SECRET", raising=False)
-    with pytest.raises(ArmingError, match="missing credentials"):
+    with pytest.raises(ArmingError, match="no credential permitted to trade"):
         LiveBroker(arm=True)
 
 
@@ -386,3 +388,24 @@ def test_reversion_holding_tracks_its_half_life_band():
     slow = MeanReversionStrategy(MeanReversionParams(min_half_life=5.0, max_half_life=300.0))
     fast = MeanReversionStrategy(MeanReversionParams(min_half_life=1.0, max_half_life=25.0))
     assert slow.expected_holding_bars > fast.expected_holding_bars
+
+
+def test_live_broker_refuses_a_read_only_stored_credential(monkeypatch):
+    """The trade tick is the consent record, and the broker re-checks it.
+
+    ModeController checks it too. Two independent checks on the one
+    irreversible path is deliberate: this one holds even if a caller
+    constructs the broker directly.
+    """
+    from types import SimpleNamespace
+
+    from godalgo.execution.live import ArmingError, LiveBroker
+
+    monkeypatch.delenv("GODALGO_API_KEY", raising=False)
+    monkeypatch.delenv("GODALGO_API_SECRET", raising=False)
+    read_only = SimpleNamespace(
+        exchange_id="binance", api_key="k", api_secret="s",
+        passphrase="", testnet=False, trade_enabled=False,
+    )
+    with pytest.raises(ArmingError, match="stored for reading only"):
+        LiveBroker(arm=True, credential=read_only)

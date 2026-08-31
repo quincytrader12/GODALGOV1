@@ -7,6 +7,7 @@ about refusal.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,18 +53,68 @@ def test_switching_to_the_current_mode_is_a_noop():
 
 # --- live gates ------------------------------------------------------------
 
-def test_live_refused_without_arming():
+def test_live_refused_with_no_credential_at_all():
     """The interface can request live; it cannot authorise it."""
     c = ModeController()
-    with pytest.raises(ModeSwitchError, match="GODALGO_ARM_LIVE"):
+    with pytest.raises(ModeSwitchError, match="no exchange key is permitted"):
         asyncio.run(c.switch(TradingMode.LIVE, confirm="GO LIVE"))
 
 
-def test_live_refused_without_credentials(monkeypatch):
-    monkeypatch.setenv("GODALGO_ARM_LIVE", ARM)
+def test_live_refused_when_env_credentials_are_present_but_unarmed(monkeypatch):
+    """A key in a shell profile is not a decision to trade with it."""
+    monkeypatch.setenv("GODALGO_API_KEY", "k")
+    monkeypatch.setenv("GODALGO_API_SECRET", "s")
     c = ModeController()
-    with pytest.raises(ModeSwitchError, match="GODALGO_API_KEY"):
+    with pytest.raises(ModeSwitchError, match="present but not armed"):
         asyncio.run(c.switch(TradingMode.LIVE, confirm="GO LIVE"))
+
+
+def test_live_refused_when_the_stored_key_is_read_only():
+    """The UI path's consent record is the per-key tick, and this is it.
+
+    A key added to read market data must not become an order-placing key
+    because a mode switch happened to find it.
+    """
+    read_only = SimpleNamespace(
+        exchange_id="binance", api_key="k", api_secret="s",
+        passphrase="", testnet=False, trade_enabled=False,
+    )
+    c = ModeController(tradeable_credential=lambda: None)
+    assert c.live_armed is False
+    assert read_only.trade_enabled is False
+    with pytest.raises(ModeSwitchError, match="no exchange key is permitted"):
+        asyncio.run(c.switch(TradingMode.LIVE, confirm="GO LIVE"))
+
+
+def test_a_ticked_stored_key_arms_live_without_any_environment_variable():
+    """The whole point of the UI path: no env var, one typed phrase.
+
+    The terminal ships as a double-clicked executable. A gate that requires
+    exporting a variable first is one the legitimate operator cannot clear.
+    """
+    permitted = SimpleNamespace(
+        exchange_id="binance", api_key="k", api_secret="s",
+        passphrase="", testnet=True, trade_enabled=True,
+    )
+    c = ModeController(tradeable_credential=lambda: permitted)
+    assert c.live_armed is True
+
+    status = c.status()
+    assert status["live_available"] is True
+    assert status["live_blockers"] == []
+    assert status["live_source"] == "binance"
+    assert status["live_testnet"] is True
+
+    # The phrase is still required -- that gate did not move.
+    with pytest.raises(ModeSwitchError, match="confirmation phrase"):
+        asyncio.run(c.switch(TradingMode.LIVE, confirm=None))
+
+
+def test_blockers_name_the_actual_remedy():
+    """"Unavailable" alone sends people to re-paste keys that were fine."""
+    blockers = ModeController().status()["live_blockers"]
+    assert blockers
+    assert "allow this key to place orders" in blockers[0]
 
 
 def test_live_refused_without_the_confirmation_phrase(monkeypatch):
@@ -96,12 +147,19 @@ def test_confirmation_is_forgiving_about_case_only(monkeypatch):
 
 
 def test_credentials_alone_do_not_imply_consent(monkeypatch):
-    """The presence of an API key is not consent to use it."""
+    """The presence of an API key is not consent to use it.
+
+    True on both routes: an unarmed environment pair, and a stored key with
+    the trade tick left off.
+    """
     monkeypatch.setenv("GODALGO_API_KEY", "k")
     monkeypatch.setenv("GODALGO_API_SECRET", "s")
     c = ModeController()
     assert c.live_armed is False
     assert c.status()["live_available"] is False
+
+    stored_but_unticked = ModeController(tradeable_credential=lambda: None)
+    assert stored_but_unticked.live_armed is False
 
 
 def test_status_reports_capability_without_secrets(monkeypatch):
@@ -183,6 +241,7 @@ def client(tmp_path):
         journal=TradingJournal(path=tmp_path / "j.jsonl", summary_path=tmp_path / "s.jsonl"),
         credentials=CredentialStore(directory=tmp_path),
         mode_controller=ModeController(),
+        market_feed_enabled=False,
     )
     return TestClient(create_app(bridge)), bridge
 
@@ -209,7 +268,7 @@ def test_live_over_http_is_refused_with_conflict(client):
     c, _ = client
     r = c.post("/api/mode", json={"mode": "live", "confirm": "GO LIVE"})
     assert r.status_code == 409
-    assert "GODALGO_ARM_LIVE" in r.json()["detail"]
+    assert "allow this key to place orders" in r.json()["detail"]
 
 
 def test_unknown_mode_is_rejected(client):

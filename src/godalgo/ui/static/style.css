@@ -43,7 +43,12 @@ html, body {
 
 #shell {
   display: grid;
-  grid-template-columns: 1fr var(--rail);
+  /* minmax(0, 1fr), not 1fr. A `1fr` track refuses to shrink below its
+     content's min-content width, so the cluster column pushed the grid wider
+     than the shell and body{overflow:hidden} clipped the rail off the right
+     edge -- visible as a rail that looks cut in half rather than as a
+     scrollbar. Same failure as the min-height:auto trap, on the other axis. */
+  grid-template-columns: minmax(0, 1fr) var(--rail);
   grid-template-rows: 34px 1fr 96px 210px;
   grid-template-areas:
     "header  rail"
@@ -153,9 +158,13 @@ html, body {
 
 .empty-hint {
   position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
+  /* column, not row. As a row flex container the text node and the <br>'s
+     following span become two flex items sitting side by side, so the line
+     break silently does nothing and the two lines run together. */
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px;
   color: var(--text-dim); letter-spacing: 0.14em; font-size: 10px;
-  pointer-events: none; text-align: center; line-height: 2;
+  pointer-events: none; text-align: center; line-height: 1.8;
 }
 
 /* ---------- laser ---------- */
@@ -217,13 +226,18 @@ html, body {
 #bottom {
   grid-area: bottom;
   display: grid;
-  grid-template-columns: 400px 1fr;
+  /* P&L is a fixed grid of figures and does not benefit from extra width;
+     the journal and the activity log are both scrolling lists, so they split
+     what is left evenly. minmax(0,...) rather than 1fr because a grid track
+     defaults to min-content width, which a long unbroken log line would blow
+     out -- that is the classic source of a horizontal scrollbar here. */
+  grid-template-columns: 360px minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--gap);
   background: var(--line);
   min-height: 0;
 }
 
-#pnl, #journal { display: flex; flex-direction: column; min-height: 0; }
+#pnl, #journal, #activity { display: flex; flex-direction: column; min-height: 0; }
 
 .pnl-grid {
   display: grid;
@@ -277,13 +291,26 @@ html, body {
 #rail {
   grid-area: rail;
   display: grid;
-  grid-template-rows: 1fr auto auto;
+  /* Detail absorbs the rail's spare height; the three configuration panels
+     size to their content. Two alternatives were tried and are worse: giving
+     the slack to connections leaves a block of dead grey under the form, and
+     letting the form flex to fill pushes its own submit button out of the
+     scroll viewport. An empty detail panel at least reads as a panel that is
+     empty, and it is the one that genuinely grows once a neuron is selected. */
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
   gap: var(--gap);
   background: var(--line);
   min-height: 0;
 }
 
-#detail, #brain, #connections { display: flex; flex-direction: column; min-height: 0; }
+#detail, #brain, #connections, #telegram {
+  display: flex; flex-direction: column; min-height: 0;
+}
+
+/* The connections panel holds the longest form, so it is the one that scrolls
+   when the rail runs short. Capping it stops the Telegram panel below being
+   pushed off the bottom on a laptop screen. */
+#telegram > .scroll { max-height: 34vh; }
 #detail .scroll { padding: 0; }
 
 .kv { display: grid; grid-template-columns: 96px 1fr; gap: 5px 10px; padding: 10px 12px; font-size: 11px; }
@@ -343,14 +370,48 @@ html, body {
 }
 .tabs button.active { color: var(--cyan); border-bottom-color: var(--cyan); }
 
-/* Screens narrower than the rail + a usable cluster stack instead of squeezing. */
+/* Three panels across the bottom need real width. Below this the activity log
+   moves under the other two rather than being squeezed to a column too narrow
+   to read a log line in. */
+@media (max-width: 1500px) {
+  #shell { grid-template-rows: 34px 1fr 96px 320px; }
+  #bottom {
+    grid-template-columns: 340px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "pnl     journal"
+      "pnl     activity";
+  }
+  #pnl { grid-area: pnl; }
+  #journal { grid-area: journal; }
+  #activity { grid-area: activity; }
+}
+
+/* Screens narrower than the rail + a usable cluster stack instead of squeezing.
+   Stacked, the five rows no longer fit one screen, so the page scrolls and
+   every row gets an explicit height. Leaving the cluster on `1fr` here
+   collapsed it to zero: the rail below it is `auto`, its four panels are
+   taller than the viewport, and a `1fr` track yields all its space to them. */
 @media (max-width: 1100px) {
   #shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: 34px 1fr 96px 210px 260px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 34px minmax(420px, 60vh) 96px 320px auto;
     grid-template-areas: "header" "cluster" "laser" "bottom" "rail";
+    height: auto;
+    min-height: 100vh;
   }
-  #rail { grid-template-rows: auto auto auto; }
+  body { overflow-y: auto; }
+  #rail { grid-template-rows: auto auto auto auto; }
+  #telegram > .scroll { max-height: none; }
+  #detail { min-height: 180px; }
+}
+
+/* The header runs out of room before anything else does. Labels go first --
+   the lamp colours still carry the state, which is what the row is for. */
+@media (max-width: 1280px) {
+  .lamp { font-size: 0; gap: 0; }
+  .lamp > i { width: 7px; height: 7px; }
+  .lamps { gap: 7px; }
 }
 
 
@@ -410,3 +471,104 @@ html, body {
 .modal-actions .danger { background: var(--red); border: 1px solid var(--red); color: #fff; }
 .modal-actions .danger:hover { background: #ff5560; }
 .modal-actions .danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ---------- status lamps ---------- */
+/*
+ * The header answers "is it connected" at a glance. Four lamps rather than one
+ * because the four failure modes need different actions: the venue being
+ * unreachable, data having gone stale, the key being rejected, and Telegram
+ * being unconfigured are not the same problem and must not share an indicator.
+ */
+.lamps { display: flex; align-items: center; gap: 10px; margin-right: 10px; }
+
+.lamp {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 9px; letter-spacing: 0.08em;
+  color: var(--text-dim); white-space: nowrap; cursor: default;
+}
+.lamp > i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--grid);
+  box-shadow: none;
+  transition: background 0.25s, box-shadow 0.25s;
+}
+.lamp.ok    > i { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.lamp.warn  > i { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+.lamp.bad   > i { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+.lamp.ok    { color: var(--text-bright); }
+.lamp.bad   { color: var(--red); }
+
+/* A pending check pulses, so "checking" never reads as "failed". */
+.lamp.busy > i { background: var(--cyan); animation: lamp-pulse 1s ease-in-out infinite; }
+@keyframes lamp-pulse {
+  0%, 100% { opacity: 0.25; box-shadow: none; }
+  50%      { opacity: 1; box-shadow: 0 0 7px var(--cyan); }
+}
+
+/* ---------- activity log ---------- */
+
+#activity .filters { display: flex; gap: 4px; margin-right: 8px; }
+#activity .filters button {
+  background: transparent; border: 1px solid var(--grid); color: var(--text-dim);
+  font: inherit; font-size: 8px; letter-spacing: 0.08em;
+  padding: 2px 6px; border-radius: 3px; cursor: pointer;
+}
+#activity .filters button.on { color: var(--cyan); border-color: var(--cyan); }
+#activity .filters button:hover { color: var(--text-bright); }
+
+.event {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 2px 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.event:hover { background: rgba(255, 255, 255, 0.02); }
+.event .t {
+  color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 9px;
+  padding-top: 1px;
+}
+.event .m { color: var(--text-bright); overflow-wrap: anywhere; }
+.event .d {
+  grid-column: 2; color: var(--text-dim); font-size: 9px; overflow-wrap: anywhere;
+}
+.event .c {
+  display: inline-block; font-size: 8px; letter-spacing: 0.07em;
+  color: var(--text-dim); margin-right: 5px; text-transform: uppercase;
+}
+.event.good  .m { color: var(--green); }
+.event.warn  .m { color: var(--amber); }
+.event.error .m { color: var(--red); }
+.event.good  .t::before,
+.event.warn  .t::before,
+.event.error .t::before { content: ""; }
+
+/* ---------- connection rows ---------- */
+
+.conn-actions { display: flex; gap: 4px; margin-top: 5px; }
+.conn-actions button {
+  background: transparent; border: 1px solid var(--grid); color: var(--text-dim);
+  font: inherit; font-size: 8px; letter-spacing: 0.07em;
+  padding: 3px 7px; border-radius: 3px; cursor: pointer; flex: 1;
+}
+.conn-actions button:hover { color: var(--cyan); border-color: var(--cyan); }
+.conn-actions button.armed { color: var(--red); border-color: var(--red); }
+
+.conn-check { font-size: 9px; margin-top: 4px; line-height: 1.5; }
+.conn-check.ok  { color: var(--green); }
+.conn-check.bad { color: var(--red); }
+
+/* ---------- forms ---------- */
+
+.form button.wide { width: 100%; }
+
+.form .help { margin: 2px 0 0; font-size: 10px; color: var(--text-dim); }
+.form .help summary { cursor: pointer; color: var(--cyan); font-size: 10px; }
+.form .help ol { margin: 6px 0 0; padding-left: 16px; line-height: 1.6; }
+.form .help code {
+  background: var(--grid); padding: 0 3px; border-radius: 2px; font-size: 9px;
+}
+
+.note.ok { color: var(--green); }

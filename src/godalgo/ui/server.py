@@ -20,6 +20,8 @@ import ipaddress
 import json
 import logging
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,9 +34,11 @@ from fastapi.staticfiles import StaticFiles
 from godalgo.execution.mode import ModeController, ModeSwitchError
 from godalgo.execution.types import TradingMode
 from godalgo.ui.credentials import CredentialStore, ExchangeCredential
+from godalgo.ui.events import EventLog
 from godalgo.ui.journal import TradingJournal
 from godalgo.ui.state import PositionTracker, TerminalHealth, UISnapshot
 from godalgo.ui.telegram import TelegramNotifier
+from godalgo.ui.venue import ProbeResult, VenueProbe
 
 __all__ = ["UIBridge", "create_app", "run_server"]
 
@@ -74,7 +78,29 @@ class UIBridge:
     tracker: PositionTracker = field(default_factory=PositionTracker)
     journal: TradingJournal = field(default_factory=TradingJournal)
     credentials: CredentialStore = field(default_factory=CredentialStore)
-    telegram: TelegramNotifier = field(default_factory=TelegramNotifier)
+    telegram: TelegramNotifier = field(init=False)
+    events: EventLog = field(default_factory=EventLog)
+    """Everything the terminal is doing, as a readable stream.
+
+    The reason this exists: a bot that is working and a bot that is silently
+    doing nothing look identical from the outside, and the second is the
+    expensive case.
+    """
+
+    venue_status: dict[str, Any] = field(default_factory=dict)
+    """Last probe result per check name. Rendered as the connection lamps."""
+
+    last_price: float = 0.0
+    last_price_at: datetime | None = None
+    prices: dict[str, float] = field(default_factory=dict)
+    market_feed_enabled: bool = True
+    """Whether to poll public market data on startup.
+
+    Off in tests and in demo mode, where a real network call would make the
+    suite depend on an exchange being up.
+    """
+
+    _feed_task: Any = field(default=None, init=False, repr=False)
 
     mode_controller: ModeController | None = None
     """Owns the broker and performs guarded mode switches.
@@ -110,6 +136,23 @@ class UIBridge:
     reconnects: int = 0
     errors: int = 0
     decisions_run: int = 0
+
+    def __post_init__(self) -> None:
+        # The notifier persists its token in the same owner-only file as the
+        # exchange keys, so it needs the store handed to it at construction.
+        self.telegram = TelegramNotifier(store=self.credentials)
+
+    @property
+    def probe(self) -> VenueProbe:
+        return VenueProbe(self.events)
+
+    def record_probe(self, results: list[ProbeResult]) -> None:
+        """Fold probe results into the status lamps."""
+        for result in results:
+            self.venue_status[result.name] = result.to_dict()
+            if result.name == "market_data" and result.ok:
+                self.last_price = float(result.data.get("price") or 0.0)
+                self.last_price_at = datetime.now(UTC)
 
     def record_fill(
         self, symbol: str, signed_quantity: float, price: float, fee: float = 0.0, **kwargs: Any
@@ -166,6 +209,9 @@ class UIBridge:
             conviction=self.conviction,
             target_weight=self.target_weight,
             current_weight=self.current_weight,
+            last_price=self.last_price,
+            venue=dict(self.venue_status),
+            events=self.events.entries(limit=40),
         )
 
     async def check_daily_rollover(self) -> None:
@@ -179,7 +225,34 @@ class UIBridge:
 
 def create_app(bridge: UIBridge) -> FastAPI:
     """Build the FastAPI application."""
-    app = FastAPI(title="GODALGO", docs_url=None, redoc_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """Run the public market feed for the life of the server.
+
+        Started here rather than lazily on first page load, so the terminal is
+        already showing live prices by the time anyone opens it, and so a
+        headless run still logs whether the venue is reachable.
+        """
+        task: asyncio.Task | None = None
+        if bridge.market_feed_enabled:
+            from godalgo.ui.feed import MarketFeed
+
+            task = asyncio.create_task(
+                MarketFeed(bridge, symbols=[bridge.symbol]).run()
+            )
+            bridge._feed_task = task
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    app = FastAPI(
+        title="GODALGO", docs_url=None, redoc_url=None, lifespan=lifespan,
+    )
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -220,20 +293,99 @@ def create_app(bridge: UIBridge) -> FastAPI:
         if missing:
             raise HTTPException(status_code=400, detail=f"missing: {', '.join(missing)}")
 
-        bridge.credentials.add(
-            ExchangeCredential(
-                exchange_id=str(payload["exchange_id"]).strip(),
-                api_key=str(payload["api_key"]).strip(),
-                api_secret=str(payload["api_secret"]).strip(),
-                label=str(payload.get("label") or "").strip(),
-                passphrase=str(payload.get("passphrase") or "").strip(),
-                testnet=bool(payload.get("testnet", False)),
-                # Trading stays off unless explicitly requested, so pasting a
-                # key into a form cannot by itself authorise orders.
-                trade_enabled=bool(payload.get("trade_enabled", False)),
-            )
+        credential = ExchangeCredential(
+            exchange_id=str(payload["exchange_id"]).strip(),
+            api_key=str(payload["api_key"]).strip(),
+            api_secret=str(payload["api_secret"]).strip(),
+            label=str(payload.get("label") or "").strip(),
+            passphrase=str(payload.get("passphrase") or "").strip(),
+            testnet=bool(payload.get("testnet", False)),
+            # Trading stays off unless explicitly requested, so pasting a
+            # key into a form cannot by itself authorise orders.
+            trade_enabled=bool(payload.get("trade_enabled", False)),
+        )
+        bridge.credentials.add(credential)
+        bridge.events.info(
+            "credentials",
+            f"added {credential.exchange_id} key"
+            + (" (testnet)" if credential.testnet else ""),
+            "may place orders" if credential.trade_enabled else "read-only",
+        )
+
+        # Test it immediately. Saving a key and seeing nothing happen is the
+        # single most confusing state this interface can be in -- it is
+        # indistinguishable from the key being ignored, which it used to be.
+        results = await bridge.probe.check_credentials(credential, bridge.symbol)
+        bridge.record_probe(results)
+        return JSONResponse({
+            "ok": True,
+            "exchanges": bridge.credentials.listing(),
+            "checks": [r.to_dict() for r in results],
+        })
+
+    @app.post("/api/connections/{key}/test")
+    async def test_connection(key: str) -> JSONResponse:
+        """Re-run the read-only checks against a stored key.
+
+        Reads only: reachability, a ticker, and the account balance. Nothing
+        here can place, amend or cancel an order.
+        """
+        credential = bridge.credentials.get(key)
+        if credential is None:
+            raise HTTPException(status_code=404, detail="no such connection")
+        results = await bridge.probe.check_credentials(credential, bridge.symbol)
+        bridge.record_probe(results)
+        return JSONResponse({
+            "ok": all(r.ok for r in results),
+            "checks": [r.to_dict() for r in results],
+        })
+
+    @app.post("/api/connections/{key}/trade-enabled")
+    async def set_trade_enabled(key: str, payload: dict[str, Any]) -> JSONResponse:
+        """Grant or revoke this key's permission to place orders.
+
+        This flag is the consent record the live switch checks, so it is a
+        deliberate action of its own rather than something bundled into
+        saving a key.
+        """
+        enabled = bool(payload.get("enabled", False))
+        if not bridge.credentials.set_trade_enabled(key, enabled):
+            raise HTTPException(status_code=404, detail="no such connection")
+        bridge.events.record(
+            "warn" if enabled else "info", "credentials",
+            f"{key} {'may now place orders' if enabled else 'is now read-only'}",
         )
         return JSONResponse({"ok": True, "exchanges": bridge.credentials.listing()})
+
+    @app.post("/api/venue/check")
+    async def venue_check(payload: dict[str, Any] | None = None) -> JSONResponse:
+        """Prove the terminal can reach the venue and read prices.
+
+        Needs no key and no funds, which is the point: it settles "is this
+        actually talking to the exchange" before any decision to deposit.
+        """
+        body = payload or {}
+        exchange_id = str(body.get("exchange_id") or "binance").strip()
+        symbol = str(body.get("symbol") or bridge.symbol).strip()
+
+        results = await bridge.probe.check_public(exchange_id, symbol)
+        stored = bridge.credentials.first_for(exchange_id)
+        if stored is not None and results[0].ok:
+            results = await bridge.probe.check_credentials(stored, symbol)
+        bridge.record_probe(results)
+        return JSONResponse({
+            "ok": all(r.ok for r in results),
+            "checks": [r.to_dict() for r in results],
+            "credential_tested": stored is not None,
+        })
+
+    @app.get("/api/events")
+    async def events(limit: int = 80, since: int = 0) -> JSONResponse:
+        return JSONResponse({
+            "events": bridge.events.entries(limit=limit, since=since),
+            "latest": bridge.events.latest_sequence,
+            "counts": bridge.events.counts(),
+        })
 
     @app.delete("/api/connections/{key}")
     async def remove_connection(key: str) -> JSONResponse:
@@ -278,17 +430,60 @@ def create_app(bridge: UIBridge) -> FastAPI:
         except ModeSwitchError as exc:
             # 409 rather than 400: the request is well-formed, the system state
             # or environment does not permit it.
+            bridge.events.error("mode", f"refused switch to {target.value}", str(exc))
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         bridge.mode = target.value
+        bridge.events.record(
+            "warn" if target is TradingMode.LIVE else "info", "mode",
+            f"mode is now {target.value}",
+            "positions were flattened first" if change.flattened else "",
+        )
         return JSONResponse({"ok": True, "change": change.to_dict(),
                              **bridge.mode_controller.status()})
+
+    @app.post("/api/telegram")
+    async def telegram_configure(payload: dict[str, Any]) -> JSONResponse:
+        """Save the bot token and chat id, then prove they work.
+
+        Verified immediately for the same reason exchange keys are: a settings
+        form that accepts anything and reports nothing teaches you it worked
+        when it did not.
+        """
+        token = str(payload.get("token") or "").strip()
+        chat_id = str(payload.get("chat_id") or "").strip()
+        if not token or not chat_id:
+            raise HTTPException(status_code=400, detail="token and chat_id required")
+
+        bridge.telegram.configure(token, chat_id)
+        ok, message = await bridge.telegram.verify()
+        if ok:
+            await bridge.telegram.send(
+                "GODALGO terminal connected. Daily summaries will arrive here."
+            )
+            bridge.events.good("telegram", "connected", message)
+        else:
+            # Never the token, and never the URL, which embeds it.
+            bridge.events.error("telegram", "could not connect", message)
+        return JSONResponse({
+            "ok": ok, "message": message, "telegram": bridge.telegram.status,
+        })
+
+    @app.delete("/api/telegram")
+    async def telegram_clear() -> JSONResponse:
+        bridge.telegram.clear()
+        bridge.events.info("telegram", "disconnected")
+        return JSONResponse({"ok": True, "telegram": bridge.telegram.status})
 
     @app.post("/api/telegram/test")
     async def telegram_test() -> JSONResponse:
         ok, message = await bridge.telegram.verify()
         if ok:
             await bridge.telegram.send("GODALGO terminal connected.")
+        bridge.events.record(
+            "good" if ok else "error", "telegram",
+            "test message sent" if ok else "test failed", message,
+        )
         return JSONResponse({"ok": ok, "message": message})
 
     @app.post("/api/telegram/digest")
