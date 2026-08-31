@@ -572,3 +572,79 @@ html, body {
 }
 
 .note.ok { color: var(--green); }
+
+/* ---------- watchlist ---------- */
+/*
+ * Shares the detail panel: the watchlist is what that space shows until a
+ * neuron is clicked. An empty panel reading "SELECT A NEURON" was the largest
+ * dead area on the screen, and the bot always has something to say there --
+ * what it is currently looking at.
+ */
+
+.wl-head, .wl-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px 56px 50px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 12px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wl-head {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line);
+  color: var(--text-dim);
+  font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase;
+  padding-top: 6px; padding-bottom: 6px;
+}
+.wl-head span:not(:first-child), .wl-row span:not(:first-child) { text-align: right; }
+
+.wl-row {
+  border-bottom: 1px solid rgba(27, 37, 55, 0.4);
+  color: var(--text-bright);
+  /* Fixed height so a value changing width cannot reflow the list under the
+     pointer. The panel repaints once a second; a list that shifts as numbers
+     grow a digit is unusable. */
+  height: 26px;
+}
+.wl-row:hover { background: rgba(255, 255, 255, 0.025); }
+
+.wl-row .sym { display: flex; align-items: center; gap: 6px; overflow: hidden; }
+.wl-row .sym b {
+  font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wl-row .tag {
+  font-size: 7.5px; letter-spacing: 0.06em; padding: 1px 4px; border-radius: 2px;
+  border: 1px solid currentColor; flex: 0 0 auto;
+}
+.wl-row .tag.held   { color: var(--green); }
+.wl-row .tag.active { color: var(--cyan); }
+
+.wl-row .up   { color: var(--green); }
+.wl-row .down { color: var(--red); }
+.wl-row .sp   { color: var(--text-dim); font-size: 9px; }
+
+/* A row the venue stopped returning is greyed rather than removed: a row that
+   vanishes and returns makes the list flicker and loses the reader's place. */
+.wl-row.stale { opacity: 0.4; }
+.wl-row.held  { background: rgba(0, 255, 140, 0.04); }
+
+.panel-title button.tiny {
+  background: none; border: 1px solid var(--grid); color: var(--text-dim);
+  font: inherit; font-size: 8px; letter-spacing: 0.06em;
+  padding: 2px 6px; border-radius: 3px; cursor: pointer; margin-right: 8px;
+}
+.panel-title button.tiny:hover { color: var(--cyan); border-color: var(--cyan); }
+
+/* An empty watchlist explains itself: waiting and failed are different states
+   and need different remedies, so they must not share a message. */
+#w-empty.warn {
+  color: var(--red);
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 14px 16px;
+  line-height: 1.6;
+  text-align: center;
+}

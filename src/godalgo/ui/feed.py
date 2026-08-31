@@ -36,6 +36,20 @@ __all__ = ["MarketFeed"]
 logger = logging.getLogger(__name__)
 
 
+def _unsupported_errors() -> tuple[type[BaseException], ...]:
+    """Exceptions that mean 'this venue will not batch', and nothing else.
+
+    Resolved once at import rather than inline, so the tuple is not rebuilt
+    on every poll.
+    """
+    import ccxt
+
+    return (NotImplementedError, ccxt.NotSupported, ccxt.BadRequest, TypeError)
+
+
+_UNSUPPORTED = _unsupported_errors()
+
+
 @dataclass
 class MarketFeed:
     """Polls public tickers and pushes them into the bridge.
@@ -58,6 +72,8 @@ class MarketFeed:
     interval: float = 5.0
     _exchange: Any = field(default=None, init=False, repr=False)
     _consecutive_failures: int = field(default=0, init=False)
+    _batched: bool | None = field(default=None, init=False)
+    """Whether the venue supports one-call ticker fetches. Probed once."""
 
     async def run(self) -> None:
         """Poll until cancelled. Never raises."""
@@ -98,29 +114,57 @@ class MarketFeed:
             })
         return self._exchange
 
-    async def _fetch(self, exchange: Any) -> dict[str, float]:
-        out: dict[str, float] = {}
+    async def _fetch(self, exchange: Any) -> dict[str, dict[str, float]]:
+        """Read every watched symbol, in one request where the venue allows it.
+
+        ``fetch_tickers`` is a single call covering the whole list;
+        ``fetch_ticker`` is one call per symbol. With a dozen symbols on a five
+        second cadence that is the difference between 12 requests and 1, and
+        the loop form is also sequential -- twelve round trips of latency
+        stacked inside one tick, which is what makes a watchlist feel slow and
+        what trips venue rate limits.
+        """
+        if self._batched is None:
+            self._batched = bool(getattr(exchange, "has", {}).get("fetchTickers"))
+
+        if self._batched:
+            try:
+                raw = await exchange.fetch_tickers(self.symbols)
+                return {s: _row(t) for s, t in raw.items() if t}
+            except _UNSUPPORTED:
+                # Narrow on purpose. Some venues advertise fetchTickers and
+                # still reject an explicit symbol list, which is worth falling
+                # back for -- but catching every exception here would read a
+                # network blip as "batching unsupported" and permanently
+                # downgrade the feed to one request per symbol per tick, which
+                # is the exact cost this method exists to avoid. A transport
+                # failure belongs to the outage handler, so it propagates.
+                self._batched = False
+                logger.debug("fetch_tickers unsupported; falling back", exc_info=True)
+
+        out: dict[str, dict[str, float]] = {}
         for symbol in self.symbols:
-            ticker = await exchange.fetch_ticker(symbol)
-            price = ticker.get("last") or ticker.get("close")
-            if price:
-                out[symbol] = float(price)
+            out[symbol] = _row(await exchange.fetch_ticker(symbol))
         return out
 
-    def _on_success(self, tickers: dict[str, float]) -> None:
+    def _on_success(self, tickers: dict[str, dict[str, float]]) -> None:
         recovered = self._consecutive_failures > 0
         self._consecutive_failures = 0
 
-        headline = next(iter(tickers.values()))
+        prices = {s: r["price"] for s, r in tickers.items() if r.get("price")}
+        # The headline follows the engine's symbol rather than whatever the
+        # venue returned first, which is dict order and effectively arbitrary.
+        headline = prices.get(self.bridge.symbol) or next(iter(prices.values()), 0.0)
         self.bridge.last_price = headline
         self.bridge.last_price_at = datetime.now(UTC)
-        self.bridge.prices.update(tickers)
+        self.bridge.prices.update(prices)
+        self.bridge.update_watchlist(tickers)
         self.bridge.connected = True
         self.bridge.last_data_at = datetime.now(UTC)
         self.bridge.venue_status["market_data"] = {
             "name": "market_data", "ok": True,
-            "detail": f"{len(tickers)} symbol(s) live",
-            "data": {"price": headline, "symbols": len(tickers)},
+            "detail": f"{len(prices)} symbol(s) live",
+            "data": {"price": headline, "symbols": len(prices)},
         }
         # A successful ticker is proof of reachability too. Leaving the venue
         # lamp grey while prices stream would be its own kind of lie.
@@ -173,3 +217,31 @@ class MarketFeed:
             with contextlib.suppress(Exception):
                 await self._exchange.close()
             self._exchange = None
+
+
+def _row(ticker: dict[str, Any]) -> dict[str, float]:
+    """Reduce a ccxt ticker to the handful of numbers the panel renders.
+
+    A ccxt ticker carries a nested ``info`` blob of raw venue JSON. Passing
+    that through would put kilobytes per symbol into a frame sent once a
+    second, for fields nothing reads.
+    """
+    price = ticker.get("last") or ticker.get("close") or 0.0
+    bid, ask = ticker.get("bid"), ticker.get("ask")
+
+    spread_bps = 0.0
+    if bid and ask and ask > 0:
+        mid = (bid + ask) / 2.0
+        if mid > 0:
+            spread_bps = (ask - bid) / mid * 10_000.0
+
+    # ccxt reports percentage as a percent, not a fraction.
+    percentage = ticker.get("percentage")
+    change = float(percentage) / 100.0 if percentage is not None else 0.0
+
+    return {
+        "price": float(price or 0.0),
+        "change_pct": change,
+        "quote_volume": float(ticker.get("quoteVolume") or 0.0),
+        "spread_bps": spread_bps,
+    }

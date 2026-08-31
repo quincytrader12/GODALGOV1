@@ -27,7 +27,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-__all__ = ["Neuron", "PositionTracker", "TerminalHealth", "UISnapshot"]
+__all__ = [
+    "Neuron", "PositionTracker", "TerminalHealth", "UISnapshot", "WatchedSymbol",
+]
 
 
 @dataclass
@@ -367,6 +369,45 @@ class TerminalHealth:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class WatchedSymbol:
+    """One row of the watchlist: an instrument the bot is tracking.
+
+    Carries only what the panel renders. Deliberately not the full ticker --
+    a ccxt ticker is ~30 fields including a nested `info` blob of raw venue
+    JSON, and shipping that for every symbol once a second is a websocket
+    frame two orders of magnitude larger than the panel needs.
+    """
+
+    symbol: str
+    price: float = 0.0
+    change_pct: float = 0.0
+    """24h change, as a fraction. The venue reports this; it is not derived
+    from our own history, which would be wrong for the first hour of a run."""
+
+    quote_volume: float = 0.0
+    spread_bps: float = 0.0
+    held: bool = False
+    """Whether a position is currently open in it."""
+
+    active: bool = False
+    """Whether it is the symbol the engine is currently deciding on."""
+
+    stale: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "price": round(self.price, 8),
+            "change_pct": round(self.change_pct, 5),
+            "quote_volume": round(self.quote_volume, 2),
+            "spread_bps": round(self.spread_bps, 2),
+            "held": self.held,
+            "active": self.active,
+            "stale": self.stale,
+        }
+
+
 @dataclass
 class UISnapshot:
     """Everything the front end renders in one frame."""
@@ -391,6 +432,9 @@ class UISnapshot:
     target_weight: float = 0.0
     current_weight: float = 0.0
     last_price: float = 0.0
+    watchlist: list[WatchedSymbol] = field(default_factory=list)
+    """Instruments the bot is tracking, best-ranked first."""
+
     venue: dict[str, Any] = field(default_factory=dict)
     """Per-check connection state, rendered as the status lamps."""
 
@@ -431,6 +475,7 @@ class UISnapshot:
                 "current_weight": round(self.current_weight, 5),
                 "last_price": round(self.last_price, 8),
             },
+            "watchlist": [w.to_dict() for w in self.watchlist],
             "venue": self.venue,
             "events": self.events,
         }

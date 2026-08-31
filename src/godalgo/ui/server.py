@@ -22,7 +22,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,7 +36,12 @@ from godalgo.execution.types import TradingMode
 from godalgo.ui.credentials import CredentialStore, ExchangeCredential
 from godalgo.ui.events import EventLog
 from godalgo.ui.journal import TradingJournal
-from godalgo.ui.state import PositionTracker, TerminalHealth, UISnapshot
+from godalgo.ui.state import (
+    PositionTracker,
+    TerminalHealth,
+    UISnapshot,
+    WatchedSymbol,
+)
 from godalgo.ui.telegram import TelegramNotifier
 from godalgo.ui.venue import ProbeResult, VenueProbe
 
@@ -63,6 +68,18 @@ def _static_dir() -> Path:
 
 _STATIC = _static_dir()
 _LOOPBACK_ONLY = "the UI holds exchange credentials and has no authentication"
+
+DEFAULT_UNIVERSE: tuple[str, ...] = (
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+    "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "DOGE/USDT",
+    "LTC/USDT", "ATOM/USDT",
+)
+"""What the terminal watches out of the box.
+
+Twelve liquid majors: enough that the panel shows the bot surveying a
+market rather than staring at one symbol, and few enough that the whole
+set arrives in a single batched request.
+"""
 
 
 @dataclass
@@ -93,6 +110,19 @@ class UIBridge:
     last_price: float = 0.0
     last_price_at: datetime | None = None
     prices: dict[str, float] = field(default_factory=dict)
+    watchlist: dict[str, WatchedSymbol] = field(default_factory=dict)
+    """What the bot is currently tracking, keyed by symbol.
+
+    A dict rather than a list so a tick updates in place: rebuilding the
+    collection each poll would churn objects the snapshot serialises once a
+    second, for a set of symbols that changes almost never.
+    """
+
+    universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
+    """Symbols the feed polls. The scanner narrows this to what it will trade;
+    the watchlist shows the whole set so the operator can see what was
+    considered, not only what was chosen."""
+
     market_feed_enabled: bool = True
     """Whether to poll public market data on startup.
 
@@ -145,6 +175,44 @@ class UIBridge:
     @property
     def probe(self) -> VenueProbe:
         return VenueProbe(self.events)
+
+    def update_watchlist(self, rows: dict[str, dict[str, float]]) -> None:
+        """Fold a poll into the watchlist.
+
+        Held and active are recomputed every tick rather than tracked, because
+        a position can open or close between polls and a stale marker on a
+        watchlist is worse than no marker: it says the bot is in something it
+        is not.
+        """
+        held = {n.symbol for n in self.tracker.open_positions.values()}
+        for symbol, row in rows.items():
+            self.watchlist[symbol] = WatchedSymbol(
+                symbol=symbol,
+                price=row.get("price", 0.0),
+                change_pct=row.get("change_pct", 0.0),
+                quote_volume=row.get("quote_volume", 0.0),
+                spread_bps=row.get("spread_bps", 0.0),
+                held=symbol in held,
+                active=symbol == self.symbol,
+                stale=False,
+            )
+
+        # Anything the venue did not return this tick is marked stale rather
+        # than dropped. A row that vanishes and reappears makes the panel
+        # flicker and loses the operator's place; a greyed row says plainly
+        # that this one number is old.
+        for symbol, existing in self.watchlist.items():
+            if symbol not in rows and not existing.stale:
+                self.watchlist[symbol] = replace(existing, stale=True)
+
+    def watchlist_rows(self) -> list[WatchedSymbol]:
+        """Ordered for reading: what the bot is in, then what it is on, then
+        by turnover. Sorting by price or by symbol would bury the row that
+        matters under whatever happens to be alphabetically first."""
+        return sorted(
+            self.watchlist.values(),
+            key=lambda w: (not w.held, not w.active, -w.quote_volume, w.symbol),
+        )
 
     def record_probe(self, results: list[ProbeResult]) -> None:
         """Fold probe results into the status lamps."""
@@ -210,6 +278,7 @@ class UIBridge:
             target_weight=self.target_weight,
             current_weight=self.current_weight,
             last_price=self.last_price,
+            watchlist=self.watchlist_rows(),
             venue=dict(self.venue_status),
             events=self.events.entries(limit=40),
         )
@@ -221,6 +290,18 @@ class UIBridge:
             return
         logger.info("daily rollover: %s", summary.day)
         await self.telegram.send(summary.as_telegram())
+
+
+def _watch_symbols(bridge: UIBridge) -> list[str]:
+    """The universe, with the traded symbol guaranteed present.
+
+    A bot deciding on a symbol the watchlist does not carry would show its
+    headline price as blank while claiming to be trading it.
+    """
+    symbols = list(bridge.universe)
+    if bridge.symbol and bridge.symbol not in symbols:
+        symbols.insert(0, bridge.symbol)
+    return symbols
 
 
 def create_app(bridge: UIBridge) -> FastAPI:
@@ -239,7 +320,7 @@ def create_app(bridge: UIBridge) -> FastAPI:
             from godalgo.ui.feed import MarketFeed
 
             task = asyncio.create_task(
-                MarketFeed(bridge, symbols=[bridge.symbol]).run()
+                MarketFeed(bridge, symbols=_watch_symbols(bridge)).run()
             )
             bridge._feed_task = task
         try:

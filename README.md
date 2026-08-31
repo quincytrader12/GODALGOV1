@@ -268,6 +268,41 @@ to trade — someone who set one up is mid-verification, and quietly picking
 their real-money key instead is exactly the surprise this system exists to
 avoid.
 
+### The watchlist
+
+The panel beside the cluster shows what the bot is currently looking at —
+twelve liquid majors by default, live, from startup, in every mode. It costs
+no key and no funds, so it is also the fastest answer to "is this thing
+running".
+
+| Column | |
+|---|---|
+| instrument | `POS` if a position is open in it, `ON` if it is the symbol being decided |
+| last | Live price |
+| 24h | The venue's own 24-hour change, not one derived from our history — which would be wrong for the first hour of a run |
+| spread | Basis points of the mid; the first thing that makes a symbol untradeable |
+
+Ordering is what the bot is **in**, then what it is **on**, then by turnover.
+Sorting alphabetically would bury the row that matters under whatever starts
+with an A.
+
+Two things keep it cheap enough to run beside a 60fps canvas:
+
+* **One request per poll, not one per symbol.** `fetch_tickers` covers the
+  whole list in a single call. The per-symbol form is also sequential, so a
+  dozen symbols meant a dozen round trips of latency stacked inside one tick —
+  the usual reason a watchlist feels slow, and a good way to trip a rate limit.
+* **Rows are mutated, never rebuilt.** Regenerating a dozen rows of `innerHTML`
+  once a second reallocates every node, drops the scroll position and kills any
+  text selection. Only cells whose text actually changed are touched.
+
+Measured in Chromium with every cell changing every frame: `renderWatchlist`
+takes 0.5ms median and 0.7ms worst against a 16.7ms budget, no long tasks, and
+a node count flat at 594 over 40 seconds.
+
+A symbol the venue stops returning goes **grey**, not missing. A row that
+vanishes and reappears makes the list flicker and loses your place.
+
 ### Status lamps and the activity log
 
 Four lamps in the header, deliberately not one: an unreachable venue, stale

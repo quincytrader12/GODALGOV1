@@ -953,12 +953,134 @@ canvas.addEventListener('click', (event) => {
 
 /* ------------------------------------------------------------- panels */
 
+/* --------------------------------------------------------- watchlist */
+/*
+ * Rows are created once and mutated in place, never rebuilt. The snapshot
+ * arrives once a second; regenerating a dozen rows of innerHTML at that rate
+ * discards and reallocates every node, drops the scroll position, kills any
+ * text selection, and shows up as a steady stutter. Only the cells whose text
+ * actually changed are touched.
+ */
+
+const wlRows = new Map();
+
+function buildWatchRow(symbol) {
+  const row = document.createElement('div');
+  row.className = 'wl-row';
+  row.innerHTML = `
+    <span class="sym"><b></b></span>
+    <span class="px"></span>
+    <span class="ch"></span>
+    <span class="sp"></span>`;
+  const cells = {
+    root: row,
+    sym: row.querySelector('.sym'),
+    name: row.querySelector('.sym b'),
+    px: row.querySelector('.px'),
+    ch: row.querySelector('.ch'),
+    sp: row.querySelector('.sp'),
+    last: {},
+  };
+  cells.name.textContent = symbol;
+  wlRows.set(symbol, cells);
+  return cells;
+}
+
+function setText(node, value) {
+  // Assigning identical text still dirties the node in some engines; the
+  // comparison is cheaper than the layout it avoids.
+  if (node.textContent !== value) node.textContent = value;
+}
+
+function renderWatchlist(rows, venue) {
+  if (!rows) return;
+  const container = $('w-rows');
+
+  const empty = $('w-empty');
+  empty.hidden = rows.length > 0;
+  if (!rows.length) {
+    // "Connecting…" forever is a lie once the venue has actually failed. Say
+    // which it is, and why, since the remedy differs completely.
+    const data = venue && venue.market_data;
+    const failed = data && data.ok === false;
+    empty.textContent = failed
+      ? (data.detail || 'market data unavailable')
+      : 'CONNECTING TO MARKET DATA…';
+    empty.className = failed ? 'empty warn' : 'empty';
+  }
+
+  let previous = null;
+  for (const w of rows) {
+    let cells = wlRows.get(w.symbol);
+    if (!cells) cells = buildWatchRow(w.symbol);
+
+    // Reorder only when this row is not already in the right place. Ranking
+    // shifts when turnover moves, but appendChild on every row every second
+    // would relayout the whole list continuously.
+    const shouldFollow = previous ? previous.nextElementSibling : container.firstElementChild;
+    if (shouldFollow !== cells.root) {
+      container.insertBefore(cells.root, previous ? previous.nextElementSibling : container.firstElementChild);
+    }
+    previous = cells.root;
+
+    const price = w.price ? w.price.toLocaleString(undefined, {
+      minimumFractionDigits: w.price < 1 ? 5 : 2,
+      maximumFractionDigits: w.price < 1 ? 5 : 2,
+    }) : '—';
+    const change = (w.change_pct * 100).toFixed(2) + '%';
+    const spread = w.spread_bps ? w.spread_bps.toFixed(1) : '—';
+
+    setText(cells.px, price);
+    setText(cells.ch, change);
+    setText(cells.sp, spread);
+
+    if (cells.last.change !== w.change_pct) {
+      cells.ch.className = 'ch ' + (w.change_pct > 0 ? 'up' : w.change_pct < 0 ? 'down' : '');
+      cells.last.change = w.change_pct;
+    }
+
+    const flags = `${w.held ? 'h' : ''}${w.active ? 'a' : ''}${w.stale ? 's' : ''}`;
+    if (cells.last.flags !== flags) {
+      cells.root.className = 'wl-row'
+        + (w.stale ? ' stale' : '')
+        + (w.held ? ' held' : '');
+      // Tags are rebuilt only when they change, which is almost never.
+      cells.sym.querySelectorAll('.tag').forEach((t) => t.remove());
+      if (w.held) cells.sym.insertAdjacentHTML('beforeend', '<span class="tag held">POS</span>');
+      if (w.active) cells.sym.insertAdjacentHTML('beforeend', '<span class="tag active">ON</span>');
+      cells.last.flags = flags;
+    }
+  }
+
+  // Drop rows the server no longer sends at all. Rare -- the universe is
+  // fixed -- but without it a renamed symbol would linger for the session.
+  if (wlRows.size > rows.length) {
+    const live = new Set(rows.map((w) => w.symbol));
+    for (const [symbol, cells] of wlRows) {
+      if (!live.has(symbol)) { cells.root.remove(); wlRows.delete(symbol); }
+    }
+  }
+}
+
+function showWatchlist(show) {
+  $('w-body').hidden = !show;
+  $('d-body').hidden = show;
+  $('d-back').hidden = show;
+  $('d-title').textContent = show ? 'Watchlist' : 'Position detail';
+}
+
+$('d-back').addEventListener('click', () => {
+  state.selected = null;
+  showWatchlist(true);
+});
+
 function renderDetail(d) {
   const body = $('d-body');
-  $('d-id').textContent = d ? d.id : 'overview';
-  // With nothing selected the panel shows a cluster overview rather than an
-  // empty box -- the space exists either way, so it may as well say something.
-  if (!d) { body.innerHTML = clusterOverview(); return; }
+  $('d-id').textContent = d ? d.id : `${wlRows.size} watched`;
+  // Nothing selected: the panel shows the watchlist, which is always saying
+  // something, rather than an empty box that never is.
+  if (!d) { showWatchlist(true); return; }
+  showWatchlist(false);
 
   const pnlClass = d.net_pnl > 0 ? 'pos' : d.net_pnl < 0 ? 'neg' : '';
   body.innerHTML = `
@@ -983,43 +1105,6 @@ function renderDetail(d) {
       <dt>regime</dt><dd>${d.regime}</dd>
       <dt>conviction</dt><dd>${fmt(d.conviction, 3)}</dd>
     </dl>`;
-}
-
-function clusterOverview() {
-  const nodes = [...state.neurons.values()].map((n) => n.data);
-  if (!nodes.length) return '<div class="empty">NO POSITIONS YET</div>';
-
-  const closed = nodes.filter((n) => !n.is_open);
-  const open = nodes.filter((n) => n.is_open);
-  const best = closed.reduce((a, b) => (!a || b.net_pnl > a.net_pnl ? b : a), null);
-  const worst = closed.reduce((a, b) => (!a || b.net_pnl < a.net_pnl ? b : a), null);
-
-  const bySymbol = {};
-  for (const n of nodes) {
-    const s = (bySymbol[n.symbol] ||= { n: 0, pnl: 0 });
-    s.n += 1; s.pnl += n.net_pnl;
-  }
-  const rows = Object.entries(bySymbol)
-    .sort((a, b) => b[1].pnl - a[1].pnl)
-    .map(([sym, v]) => `
-      <div class="row" style="grid-template-columns:1fr 44px 80px;cursor:default">
-        <span class="s">${sym}</span>
-        <span class="t">${v.n}</span>
-        <span class="p ${v.pnl >= 0 ? 'pos' : 'neg'}">${signed(v.pnl)}</span>
-      </div>`).join('');
-
-  return `
-    <dl class="kv">
-      <dt>tracked</dt><dd>${nodes.length}</dd>
-      <dt>open</dt><dd class="amber">${open.length}</dd>
-      <dt>closed</dt><dd>${closed.length}</dd>
-      <dt>best</dt><dd class="pos">${best ? signed(best.net_pnl) + ' · ' + best.symbol : '—'}</dd>
-      <dt>worst</dt><dd class="neg">${worst ? signed(worst.net_pnl) + ' · ' + worst.symbol : '—'}</dd>
-    </dl>
-    <div class="panel-title" style="border-top:1px solid var(--line)">
-      <span>By instrument</span></div>
-    ${rows}
-    <p class="note" style="padding:10px 12px">Click any neuron for its full record.</p>`;
 }
 
 function renderHealth(h) {
@@ -1448,6 +1533,7 @@ function apply(snap) {
   renderBrain(snap.brain, snap.health);
   renderEvents(snap.events);
   renderLamps(snap);
+  renderWatchlist(snap.watchlist, snap.venue);
 
   state.equityHistory.push(snap.pnl.equity);
   if (state.equityHistory.length > 400) state.equityHistory.shift();

@@ -124,10 +124,21 @@
   <!-- ── rail ─────────────────────────────────────────────── -->
   <div id="rail">
     <div id="detail" class="panel">
-      <div class="panel-title"><span>Position detail</span><span class="spacer"></span>
-        <span class="meta" id="d-id">—</span></div>
-      <div class="scroll" id="d-body">
+      <div class="panel-title">
+        <span id="d-title">Watchlist</span>
+        <span class="spacer"></span>
+        <button class="ghost tiny" id="d-back" hidden>← watchlist</button>
+        <span class="meta" id="d-id">—</span>
+      </div>
+      <div class="scroll" id="d-body" hidden>
         <div class="empty">SELECT A NEURON</div>
+      </div>
+      <div class="scroll" id="w-body">
+        <div class="wl-head">
+          <span>instrument</span><span>last</span><span>24h</span><span>spread</span>
+        </div>
+        <div id="w-rows"></div>
+        <div class="empty" id="w-empty">CONNECTING TO MARKET DATA…</div>
       </div>
     </div>
 
