@@ -9,6 +9,7 @@
     python -m godalgo preflight   --symbol BTC/USDT
     python -m godalgo ui          --demo
     python -m godalgo scan        --timeframe 1h --top 20
+    python -m godalgo service     install   (Windows: run 24/7 in the background)
 
 Deliberately thin. It wires existing components together and prints results; it
 holds no strategy logic of its own, so anything that works here works identically
@@ -494,6 +495,16 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_service(args: argparse.Namespace) -> int:
+    """Register or control the background Windows task."""
+    from godalgo import service
+
+    argv = [args.action, "--port", str(args.port)]
+    if args.at_boot:
+        argv.append("--at-boot")
+    return service.main(argv)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="godalgo", description=__doc__)
     parser.add_argument("--verbose", action="store_true")
@@ -590,6 +601,19 @@ def build_parser() -> argparse.ArgumentParser:
                       help="populate with fabricated positions (nothing is traded)")
     p_ui.add_argument("--no-browser", action="store_true")
     p_ui.set_defaults(func=cmd_ui)
+
+    p_svc = sub.add_parser(
+        "service", help="run the terminal in the background on Windows"
+    )
+    p_svc.add_argument(
+        "action", choices=["install", "uninstall", "start", "stop", "status"],
+    )
+    p_svc.add_argument("--port", type=int, default=8787)
+    p_svc.add_argument(
+        "--at-boot", action="store_true",
+        help="start at boot rather than at sign-in; needs your Windows password",
+    )
+    p_svc.set_defaults(func=cmd_service)
 
     p_led = sub.add_parser("ledger", help="show promotion history")
     p_led.add_argument("--tail", type=int, default=20)

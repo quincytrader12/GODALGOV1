@@ -25,7 +25,20 @@ if _SRC.exists():
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="GODALGO terminal")
+    # ``service`` is dispatched before argparse rather than added as a
+    # subparser: every other invocation is bare flags, and introducing
+    # subcommands would break `godalgo-terminal.exe --port 8787`, which is what
+    # a double-click and every existing shortcut do.
+    if len(sys.argv) > 1 and sys.argv[1] == "service":
+        from godalgo.service import main as service_main
+
+        return service_main(sys.argv[2:])
+
+    parser = argparse.ArgumentParser(
+        description="GODALGO terminal",
+        epilog="run it in the background on Windows: "
+               "godalgo-terminal service install",
+    )
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--equity", type=float, default=10_000.0)
     parser.add_argument("--symbol", default="BTC/USDT")

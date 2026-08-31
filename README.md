@@ -118,9 +118,13 @@ made on a Linux machine.
 | **Releases** | Push a tag: `git tag v0.1.0 && git push origin v0.1.0` |
 | **Actions artifacts** | Run *build terminal* from the Actions tab, then download from the run |
 
+The download is a **zip containing a folder**, not a bare executable. Unzip it
+and run `godalgo-terminal.exe` from inside; the files beside it are the
+libraries it loads at startup, so moving the exe out on its own breaks it.
+
 ```
-godalgo-terminal-windows-x64.exe --demo    # fabricated data, nothing traded
-godalgo-terminal-windows-x64.exe           # attached to a real session
+godalgo-terminal.exe --demo    # fabricated data, nothing traded
+godalgo-terminal.exe           # attached to a real session
 ```
 
 Both binaries are **unsigned**, so expect a warning on first run: Windows
@@ -140,13 +144,19 @@ pip install pyinstaller
 python build-exe.py
 ```
 
-Produces `dist/godalgo-terminal` (~156 MB, `.exe` on Windows) — a single file
-that runs with no Python on the target machine.
+Produces `dist/godalgo-terminal/` — a folder holding the executable and its
+libraries, needing no Python on the target machine.
 
 ```bash
-./dist/godalgo-terminal --demo     # fabricated positions, nothing traded
-./dist/godalgo-terminal            # attached to a real session
+./dist/godalgo-terminal/godalgo-terminal --demo   # fabricated positions
+./dist/godalgo-terminal/godalgo-terminal          # attached to a real session
 ```
+
+`--onefile` collapses that folder into one file, at a real cost: the whole
+~150 MB archive unpacks to a temp directory *on every launch* before any code
+runs, which is 11.7s cold against 0.47s for the folder, and worse on Windows
+where Defender scans each extracted file as it appears. The folder is the
+default for that reason.
 
 Two things break a naive PyInstaller build, both handled by the script:
 **static files** (PyInstaller bundles imported modules, not data — without the
@@ -156,6 +166,45 @@ by name at runtime, invisible to static analysis).
 
 Verified: the built binary serves the page, JS, CSS and API, with the cluster
 live.
+
+### Running it 24/7 on Windows
+
+Leaving the window open is enough — the bot trades for as long as the process
+lives. To have Windows start it for you and bring it back if it dies:
+
+```
+godalgo-terminal.exe service install     # start it when I sign in
+godalgo-terminal.exe service start       # ...and start it now
+godalgo-terminal.exe service status
+godalgo-terminal.exe service uninstall
+```
+
+This registers a scheduled task. It is not an NT service, and the difference
+matters less than it sounds: a real service has to implement the Service
+Control Manager protocol, and registering a plain executable with `sc create`
+produces one Windows kills seconds later for failing to answer a start request.
+The scheduled task gives the same practical result — starts on its own,
+restarts on failure, survives closing the window — using only what Windows
+ships with.
+
+Three settings in the task definition are the point of writing it as XML rather
+than `schtasks` flags, none of which are reachable from the command-line form:
+
+| Setting | Why |
+|---|---|
+| `MultipleInstancesPolicy: IgnoreNew` | A restart must not start a **second bot on the same account**. Two instances would each size off the same buying power while blind to the other's position. |
+| `ExecutionTimeLimit: PT0S` | The default is 72 hours, after which Windows terminates the process mid-position. |
+| `RestartOnFailure: 1 min × 999` | Comes back from a crash without anyone present. |
+
+It starts **at sign-in, not at boot**, and that is a constraint rather than a
+preference: your exchange keys live in `%USERPROFILE%\.godalgo`, restricted by
+ACL to your account. A task running at boot has no logged-on user, so it runs as
+SYSTEM — which cannot read them, and would come up and trade nothing. Running as
+*you* at boot means storing your Windows password in Task Scheduler; `--at-boot`
+does that and says so before prompting.
+
+`service stop` kills the process. It does **not** close open positions — an
+orderly exit goes through the terminal, which flattens first.
 
 ### Switching between paper and live
 

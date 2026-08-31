@@ -57,6 +57,8 @@ HIDDEN = [
     "ccxt.pro",
     "statsmodels.tsa.stattools",
     "scipy.special.cython_special",
+    # Imported only inside a branch of run-terminal.py's main().
+    "godalgo.service",
 ]
 
 # Excluded to keep the bundle from carrying things it never uses. Every module
