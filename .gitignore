@@ -34,3 +34,6 @@ credentials.json
 dist/
 build/
 *.spec
+
+# Written by build-exe.py at package time.
+src/godalgo/_build_stamp.py

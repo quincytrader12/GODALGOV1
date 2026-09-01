@@ -736,3 +736,14 @@ html, body {
 .diag .ok   { color: var(--green); }
 .diag .bad  { color: var(--red); }
 .diag .verdict { color: var(--text-bright); display: block; margin-top: 6px; }
+
+/* The build stamp, beside the brand. Small and dim -- it only matters when
+   something is wrong, and then it matters a great deal. */
+.brand .build {
+  font-style: normal;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-left: 6px;
+  vertical-align: middle;
+}

@@ -31,6 +31,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from godalgo.build_info import describe
 from godalgo.execution.mode import ModeController, ModeSwitchError
 from godalgo.execution.types import TradingMode
 from godalgo.ui.credentials import CredentialStore, ExchangeCredential
@@ -291,6 +292,7 @@ class UIBridge:
             last_price=self.last_price,
             watchlist=self.watchlist_rows(),
             has_keys=len(self.credentials) > 0,
+            build=describe(),
             venue=dict(self.venue_status),
             events=self.events.entries(limit=40),
         )
@@ -872,6 +874,48 @@ def _assert_loopback(host: str) -> None:
         )
 
 
+def port_owner(host: str, port: int, timeout: float = 1.5) -> str:
+    """Who holds this port: ``free``, ``godalgo``, or ``other``.
+
+    Identified by asking, not by guessing. Anything can be listening on a
+    loopback port; only our own terminal answers ``/api/state`` with a
+    snapshot, so a probe distinguishes "the app is already running" from "some
+    unrelated program has the port" -- and those need opposite responses.
+    """
+    import socket
+    import urllib.error
+    import urllib.request
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(timeout)
+        if probe.connect_ex((host, port)) != 0:
+            return "free"
+
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/api/state", timeout=timeout
+        ) as response:
+            body = response.read(4096)
+    except (urllib.error.URLError, OSError, ValueError):
+        return "other"
+    return "godalgo" if b'"health"' in body and b'"pnl"' in body else "other"
+
+
+def find_free_port(host: str, start: int, attempts: int = 20) -> int | None:
+    """The first free port at or after ``start``."""
+    import socket
+
+    for candidate in range(start, start + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((host, candidate))
+            except OSError:
+                continue
+            return candidate
+    return None
+
+
 def run_server(
     bridge: UIBridge,
     host: str = "127.0.0.1",
@@ -879,10 +923,51 @@ def run_server(
     *,
     open_browser: bool = True,
 ) -> None:
-    """Serve the UI. Blocks until interrupted."""
+    """Serve the UI. Blocks until interrupted.
+
+    A second launch does not crash. Previously it died with
+
+        [Errno 10048] only one usage of each socket address ... is normally
+        permitted
+
+    which is the operating system's phrasing for "something already has this
+    port" and says nothing about what to do. Worse, the failure is silent in
+    practice: the window closes, the *older* copy is still serving, and the
+    browser shows a terminal that looks fine while being a build behind. That
+    is how a fixed bug appears not to be fixed.
+    """
     import uvicorn
 
     _assert_loopback(host)
+
+    owner = port_owner(host, port)
+    if owner == "godalgo":
+        # Already running. Show that one rather than failing; two copies on one
+        # account would size against the same buying power anyway.
+        url = f"http://{host}:{port}"
+        print(f"GODALGO is already running at {url} — opening it.")
+        print("This window can be closed. To run a second copy, pass --port.")
+        print("If it was started at sign-in, stop it with:")
+        print("  godalgo-terminal.exe service stop")
+        if open_browser:
+            import webbrowser
+
+            webbrowser.open(url)
+        return
+
+    if owner == "other":
+        alternative = find_free_port(host, port + 1)
+        if alternative is None:
+            print(
+                f"Port {port} is in use by another program, and no free port "
+                f"was found nearby. Close whatever is using it, or pass "
+                f"--port with a free one.",
+                file=sys.stderr,
+            )
+            return
+        print(f"Port {port} is in use by another program; using {alternative}.")
+        port = alternative
+
     app = create_app(bridge)
     url = f"http://{host}:{port}"
 
@@ -893,7 +978,18 @@ def run_server(
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     logger.info("GODALGO terminal on %s (loopback only)", url)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    except OSError as exc:
+        # The check above is a probe, so a race is possible: something can take
+        # the port between asking and binding. Report it in words rather than
+        # as a raw errno.
+        print(
+            f"Could not start on {url}: {exc}\n"
+            f"Something took the port after it was checked. Try again, or pass "
+            f"--port with a different one.",
+            file=sys.stderr,
+        )
 
 
 def main_cli() -> int:

@@ -380,6 +380,40 @@ used", so the property survives a change of mechanism. It also asserts the
 decision is still genuinely expensive — if it ever becomes cheap the offload
 is unnecessary, and a test that passes for the wrong reason is worse than none.
 
+### Running a second copy
+
+Launching the terminal while one is already running does **not** fail. It
+opens the running one and says so.
+
+That used to die with:
+
+```
+[Errno 10048] only one usage of each socket address (protocol/network
+address/port) is normally permitted
+```
+
+— the operating system's phrasing for "something already has this port". The
+damage was not the message but what followed: the window closed, the *older*
+copy kept serving, and the browser showed a terminal that looked perfectly
+healthy while being several builds behind. A bug that had already been fixed
+appeared not to be fixed, and nothing on screen could have revealed why.
+
+The port is now probed first, and who holds it is established by **asking**
+rather than guessing — only the terminal answers `/api/state` with a snapshot:
+
+| Holder | What happens |
+|---|---|
+| Nothing | Starts normally |
+| Another GODALGO | Opens it in the browser and exits; the message names `service stop`, since a background copy from `service install` is the likeliest owner |
+| Something unrelated | Moves to the next free port and says so |
+
+The likeliest second copy is the scheduled task, so that is named explicitly
+rather than left to be hunted down.
+
+**The build is shown next to the brand** (`GODALGO 3522f0b`) and carried in
+`/api/state`. It exists for exactly the situation above: so "am I running the
+new one?" is a question that can be answered rather than assumed.
+
 ### Exchange ids
 
 ccxt ids are **lowercase** — `binance`, `binanceus`, `kraken`. The terminal

@@ -1492,6 +1492,20 @@ function setLamp(id, state, title) {
   if (title) el.title = title;
 }
 
+function renderBuild(snap) {
+  // On the brand, as a tooltip and a suffix. A build stamp nobody can see is
+  // no use when the question is "am I even running the new one".
+  const el = $('h-build');
+  if (!el || !snap.build || el.dataset.build === snap.build) return;
+  el.dataset.build = snap.build;
+  el.title = `build ${snap.build}`;
+  el.textContent = 'GODALGO';
+  const tag = document.createElement('i');
+  tag.className = 'build';
+  tag.textContent = snap.build.split(' · ')[1] || '';
+  el.appendChild(tag);
+}
+
 function renderLamps(snap) {
   const venue = (snap.venue || {});
   const reachable = venue.reachable;
@@ -1593,6 +1607,7 @@ function apply(snap) {
   renderBrain(snap.brain, snap.health);
   renderEvents(snap.events);
   renderLamps(snap);
+  renderBuild(snap);
   renderWatchlist(snap.watchlist, snap.venue);
 
   state.equityHistory.push(snap.pnl.equity);

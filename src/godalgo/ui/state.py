@@ -435,6 +435,10 @@ class UISnapshot:
     watchlist: list[WatchedSymbol] = field(default_factory=list)
     """Instruments the bot is tracking, best-ranked first."""
 
+    build: str = ""
+    """Which build is serving. Visible so "the fix is not working" and "an
+    older copy is still running" can be told apart."""
+
     has_keys: bool = False
     """Whether any credential is stored. Distinguishes "no key" from "key not
     tested yet", which the lamps must not conflate."""
@@ -480,6 +484,7 @@ class UISnapshot:
                 "last_price": round(self.last_price, 8),
             },
             "watchlist": [w.to_dict() for w in self.watchlist],
+            "build": self.build,
             "has_keys": self.has_keys,
             "venue": self.venue,
             "events": self.events,
