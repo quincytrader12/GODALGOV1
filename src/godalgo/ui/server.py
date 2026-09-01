@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from godalgo.build_info import describe
@@ -683,6 +683,36 @@ def create_app(bridge: UIBridge) -> FastAPI:
             report["verdict"][:300],
         )
         return JSONResponse(report)
+
+    @app.get("/diagnose", response_class=PlainTextResponse)
+    async def diagnose_page(exchange: str = "") -> str:
+        """The diagnostic as a plain page, openable by typing a URL.
+
+        A GET as well as the button, because a control someone cannot find is
+        a control that does not exist. This one can be reached by typing an
+        address, survives any layout, and the output is plain text so it can
+        be selected and pasted into a bug report without a screenshot.
+        """
+        from godalgo.ui.diagnostics import run_diagnostics
+        from godalgo.ui.venue import normalise_exchange_id
+
+        exchange_id = normalise_exchange_id(exchange) or _feed_exchange(bridge)
+        report = await run_diagnostics(exchange_id)
+
+        lines = [
+            f"GODALGO diagnostics — {describe()}",
+            f"venue: {report['exchange_id']}   probe: {report['url']}",
+            "",
+        ]
+        for step in report["steps"]:
+            mark = "OK  " if step["ok"] else "FAIL"
+            lines.append(
+                f"[{mark}] {step['name']:<24s} {step['elapsed_ms']:>7.0f}ms  "
+                f"{step['detail']}"
+                + (f"  ({step['error_type']})" if step["error_type"] else "")
+            )
+        lines += ["", report["verdict"], ""]
+        return "\n".join(lines)
 
     @app.get("/api/session")
     async def session_status() -> JSONResponse:

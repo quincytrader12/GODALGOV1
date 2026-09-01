@@ -178,3 +178,53 @@ def test_a_block_page_is_not_counted_as_reachable():
     assert step.ok is False
     assert "403" in step.detail
     assert "not from the venue" in step.detail or "in the way" in step.detail
+
+
+def test_the_diagnostic_is_reachable_by_typing_a_url(tmp_path):
+    """A control someone cannot find is a control that does not exist.
+
+    The button lives in a scrolling panel and only appeared in a build the
+    operator may never have run. A GET survives any layout, needs no scrolling,
+    and its plain-text output can be pasted into a report without a screenshot.
+    """
+    from fastapi.testclient import TestClient
+
+    from godalgo.ui.credentials import CredentialStore
+    from godalgo.ui.journal import TradingJournal
+    from godalgo.ui.server import UIBridge, create_app
+
+    bridge = UIBridge(
+        credentials=CredentialStore(directory=tmp_path),
+        journal=TradingJournal(path=tmp_path / "j.jsonl",
+                               summary_path=tmp_path / "s.jsonl"),
+        market_feed_enabled=False,
+    )
+    response = TestClient(create_app(bridge)).get("/diagnose")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+
+    body = response.text
+    # The build stamp is on it: a diagnostic that does not say which build
+    # produced it is how a fixed bug gets reported twice.
+    assert "GODALGO diagnostics" in body
+    for step in ("environment", "dns"):
+        assert step in body
+    assert body.strip().endswith(".")
+
+
+def test_the_diagnose_page_accepts_a_venue(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from godalgo.ui.credentials import CredentialStore
+    from godalgo.ui.journal import TradingJournal
+    from godalgo.ui.server import UIBridge, create_app
+
+    bridge = UIBridge(
+        credentials=CredentialStore(directory=tmp_path),
+        journal=TradingJournal(path=tmp_path / "j.jsonl",
+                               summary_path=tmp_path / "s.jsonl"),
+        market_feed_enabled=False,
+    )
+    body = TestClient(create_app(bridge)).get("/diagnose?exchange=Kraken").text
+    assert "venue: kraken" in body

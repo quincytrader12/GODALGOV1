@@ -436,7 +436,12 @@ that the fix is to delete and retype a key that looks correct on screen.
 
 ### When market data will not load
 
-**Diagnose connection**, in the Connections panel, tests each layer separately
+Open **http://127.0.0.1:8787/diagnose** in a browser tab, or press **Diagnose
+connection** in the Connections panel (right rail, below *Test venue
+connection*). The URL works regardless of layout or scrolling, and its output
+is plain text — select it, paste it, done.
+
+Either one tests each layer separately
 and reports the raw error from every one. "Could not reach the venue" covers
 six different problems with six different remedies; this says which:
 
