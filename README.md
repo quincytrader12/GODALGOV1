@@ -340,6 +340,46 @@ second is the one a seemingly idle bot leaves unanswered:
 itself, whereas a warmed-up bot placing no orders is a bot deciding not to
 trade, and those need very different responses from you.
 
+### Keeping the data path off the critical path
+
+The terminal shares one event loop between the websocket feeding the browser,
+the market-data poller, and the trading engine. Anything synchronous and slow
+in that loop freezes all three for its full duration — and it presents as a
+hung UI, not as a slow calculation.
+
+Measured rather than assumed, and the results were not where intuition
+pointed. The data fetch was never the problem:
+
+| Work | Cost | Where it runs |
+|---|---|---|
+| Ticker poll (12 symbols) | one async request / 5s | non-blocking I/O |
+| `snapshot()` → JSON, 120 positions | 0.4 ms | loop, 1×/second |
+| Credential save (ACL/chmod) | 0.2 ms Linux, subprocess on Windows | worker thread |
+| **Per-bar decision, 2000 bars** | **830 ms** | **worker thread** |
+
+The decision — signals, a regime refit and a session fit over the whole
+history — is 170 ms at 600 bars, 470 ms at 1200 and 830 ms at 2000, three
+orders of magnitude above everything else. Run inline it produced a **915 ms
+event-loop stall on every bar close**: once a minute the websocket stopped, the
+watchlist stopped, and the cluster dropped ~55 frames.
+
+It now runs in a worker thread. That is safe because `frame()` builds a new
+DataFrame per call rather than handing out a view of the live buffer, and bar
+closes are serialised, so no two decisions ever touch engine state at once.
+
+Verified two ways:
+
+```
+event-loop stall during a decision   inline 915ms  →  threaded 45ms
+browser, 12 real decisions in 30s    16.7ms median · 17ms p95 · 55.5ms worst
+                                     zero long tasks, no console errors
+```
+
+`tests/test_no_blocking.py` asserts the stall bound rather than "a thread is
+used", so the property survives a change of mechanism. It also asserts the
+decision is still genuinely expensive — if it ever becomes cheap the offload
+is unnecessary, and a test that passes for the wrong reason is worse than none.
+
 ### Status lamps and the activity log
 
 Four lamps in the header, deliberately not one: an unreachable venue, stale

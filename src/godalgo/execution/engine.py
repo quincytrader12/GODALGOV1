@@ -298,7 +298,15 @@ class LiveEngine:
         if await self._maybe_reconcile(now):
             return None
 
-        target, edge_bps = self._compute_target(frame)
+        # Off the event loop. This is the single most expensive thing the bot
+        # does -- signals, a regime refit and a session fit over the whole
+        # history -- and measured at 170ms/470ms/830ms for 600/1200/2000 bars.
+        # Run inline it froze everything sharing the loop for that long on
+        # every bar close: the websocket stopped, the watchlist stopped, and
+        # the cluster dropped ~50 frames. It is pure computation over a frame
+        # snapshot, and bar closes are serialised, so a worker thread is safe;
+        # numpy and pandas release the GIL for most of it.
+        target, edge_bps = await asyncio.to_thread(self._compute_target, frame)
 
         # Per-position stop, checked before anything else. A stop that only
         # applies when the strategy happens to agree is not a stop.

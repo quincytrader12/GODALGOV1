@@ -484,6 +484,9 @@ def create_app(bridge: UIBridge) -> FastAPI:
             "exchanges": bridge.credentials.listing(),
             "telegram": bridge.telegram.status,
             "store_path": str(bridge.credentials.path),
+            # protection() shells out to icacls on Windows, so it is polled
+            # here rather than included in the once-a-second snapshot.
+            "protection": await asyncio.to_thread(bridge.credentials.protection),
         })
 
     @app.post("/api/connections")
@@ -504,7 +507,10 @@ def create_app(bridge: UIBridge) -> FastAPI:
             # key into a form cannot by itself authorise orders.
             trade_enabled=bool(payload.get("trade_enabled", False)),
         )
-        bridge.credentials.add(credential)
+        # Off the loop: on Windows the store's ACL restriction spawns icacls,
+        # and a subprocess launch there costs tens of milliseconds during which
+        # the websocket, the market feed and the trading loop all stall.
+        await asyncio.to_thread(bridge.credentials.add, credential)
         bridge.events.info(
             "credentials",
             f"added {credential.exchange_id} key"
@@ -558,7 +564,9 @@ def create_app(bridge: UIBridge) -> FastAPI:
         saving a key.
         """
         enabled = bool(payload.get("enabled", False))
-        if not bridge.credentials.set_trade_enabled(key, enabled):
+        if not await asyncio.to_thread(
+            bridge.credentials.set_trade_enabled, key, enabled
+        ):
             raise HTTPException(status_code=404, detail="no such connection")
         bridge.events.record(
             "warn" if enabled else "info", "credentials",
