@@ -461,23 +461,18 @@ def cmd_ui(args: argparse.Namespace) -> int:
     """
     import threading
 
-    from godalgo.execution.mode import ModeController
-    from godalgo.execution.types import TradingMode
-    from godalgo.ui.server import UIBridge, run_server
+    from godalgo.ui.server import UIBridge, build_terminal, run_server
     from godalgo.ui.simulator import Simulator
 
-    bridge = UIBridge(starting_equity=args.equity, equity=args.equity, mode="dry_run")
-    bridge.symbol = args.symbol
-
-    if not args.demo:
-        # A controller is only attached outside demo mode. In demo there is
-        # nothing to switch, and offering a control that silently does nothing
-        # is worse than one that reports itself unavailable.
-        controller = ModeController(mode=TradingMode.DRY_RUN, equity=args.equity)
-        bridge.mode_controller = controller
-        bridge.mode = controller.mode.value
-
     if args.demo:
+        # In demo there is nothing to switch and nothing to trade, so no
+        # controller and no session are attached: a control that silently does
+        # nothing is worse than one that reports itself unavailable.
+        bridge = UIBridge(
+            starting_equity=args.equity, equity=args.equity, mode="dry_run",
+            market_feed_enabled=False,
+        )
+        bridge.symbol = args.symbol
         simulator = Simulator(bridge)
         simulator.seed_history()
 
@@ -486,6 +481,11 @@ def cmd_ui(args: argparse.Namespace) -> int:
 
         threading.Thread(target=pump, daemon=True).start()
         print("demo mode: positions are fabricated, not traded", file=sys.stderr)
+    else:
+        bridge = build_terminal(
+            symbol=args.symbol, equity=args.equity, bar_seconds=args.bar_seconds,
+            exchange_id=args.exchange,
+        )
 
     print(f"terminal: http://{args.host}:{args.port}", file=sys.stderr)
     try:
@@ -600,6 +600,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--demo", action="store_true",
                       help="populate with fabricated positions (nothing is traded)")
     p_ui.add_argument("--no-browser", action="store_true")
+    p_ui.add_argument("--exchange", default="binance")
+    p_ui.add_argument(
+        "--bar-seconds", type=int, default=60,
+        help="decision cadence; the bot acts once per completed bar",
+    )
     p_ui.set_defaults(func=cmd_ui)
 
     p_svc = sub.add_parser(

@@ -45,7 +45,7 @@ from godalgo.ui.state import (
 from godalgo.ui.telegram import TelegramNotifier
 from godalgo.ui.venue import ProbeResult, VenueProbe
 
-__all__ = ["UIBridge", "create_app", "run_server"]
+__all__ = ["UIBridge", "build_terminal", "create_app", "run_server"]
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,9 @@ class UIBridge:
     second, for a set of symbols that changes almost never.
     """
 
+    exchange_id: str = "binance"
+    """Default venue for market data, when no credential names one."""
+
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
     """Symbols the feed polls. The scanner narrows this to what it will trade;
     the watchlist shows the whole set so the operator can see what was
@@ -131,6 +134,14 @@ class UIBridge:
     """
 
     _feed_task: Any = field(default=None, init=False, repr=False)
+
+    session: Any = None
+    """The running trading loop, if the terminal owns one.
+
+    Optional so the UI still runs as a pure viewer in demo mode. When present,
+    a mode switch starts, stops or re-brokers it -- which is what makes the
+    mode switch mean anything at all.
+    """
 
     mode_controller: ModeController | None = None
     """Owns the broker and performs guarded mode switches.
@@ -279,6 +290,7 @@ class UIBridge:
             current_weight=self.current_weight,
             last_price=self.last_price,
             watchlist=self.watchlist_rows(),
+            has_keys=len(self.credentials) > 0,
             venue=dict(self.venue_status),
             events=self.events.entries(limit=40),
         )
@@ -290,6 +302,98 @@ class UIBridge:
             return
         logger.info("daily rollover: %s", summary.day)
         await self.telegram.send(summary.as_telegram())
+
+
+def build_terminal(
+    *,
+    symbol: str = "BTC/USDT",
+    equity: float = 10_000.0,
+    bar_seconds: int = 60,
+    exchange_id: str = "binance",
+) -> UIBridge:
+    """Assemble a terminal that can actually trade.
+
+    One constructor, called by every entry point, because the previous
+    arrangement had each of them wiring this by hand and they drifted: the
+    packaged executable built a bridge with no controller at all, so every
+    mode button was disabled, and the CLI built a controller that never
+    consulted the credential store, so live was never available even with a
+    key marked as permitted. Both were invisible until someone pressed the
+    button.
+
+    Returns a bridge with:
+
+    * a ``ModeController`` that reads the credential store, so a key ticked
+      in the interface is the key live uses;
+    * a ``TradingSession`` the mode switch starts, stops and re-brokers;
+    * a flatten hook, so no switch can strand an open position.
+    """
+    from godalgo.ui.session import TradingSession
+
+    bridge = UIBridge(
+        starting_equity=equity, equity=equity, exchange_id=exchange_id,
+    )
+    bridge.symbol = symbol
+
+    session = TradingSession(
+        bridge, symbol=symbol, bar_seconds=bar_seconds, exchange_id=exchange_id,
+    )
+    bridge.session = session
+
+    async def flatten() -> None:
+        """Close everything before a mode switch.
+
+        Stopping the session routes through the engine's halt, which cancels
+        resting orders and flattens. A switch that skipped this would leave
+        the old broker holding a position nothing is managing.
+        """
+        await session.stop()
+
+    controller = ModeController(
+        mode=TradingMode.DRY_RUN,
+        equity=equity,
+        flatten=flatten,
+        # The whole point: live reads the key the operator ticked, rather than
+        # an environment variable a double-clicked executable cannot set.
+        tradeable_credential=bridge.credentials.tradeable,
+    )
+    bridge.mode_controller = controller
+    bridge.mode = controller.mode.value
+    return bridge
+
+
+async def _restart_feed(bridge: UIBridge) -> None:
+    """Rebind the background poller to the current venue."""
+    from godalgo.ui.feed import MarketFeed
+
+    task = getattr(bridge, "_feed_task", None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    if not bridge.market_feed_enabled:
+        return
+    bridge._feed_task = asyncio.create_task(
+        MarketFeed(
+            bridge,
+            exchange_id=_feed_exchange(bridge),
+            symbols=_watch_symbols(bridge),
+        ).run()
+    )
+
+
+def _feed_exchange(bridge: UIBridge) -> str:
+    """Which venue the watchlist follows.
+
+    A stored credential wins over the default: someone who added binance.us
+    keys is telling us where their account lives, and polling binance.com for
+    prices they cannot trade against would be showing them the wrong market.
+    """
+    stored = bridge.credentials.tradeable()
+    if stored is None:
+        entries = bridge.credentials.items()
+        stored = entries[0][1] if entries else None
+    return getattr(stored, "exchange_id", None) or bridge.exchange_id
 
 
 def _watch_symbols(bridge: UIBridge) -> list[str]:
@@ -315,17 +419,32 @@ def create_app(bridge: UIBridge) -> FastAPI:
         already showing live prices by the time anyone opens it, and so a
         headless run still logs whether the venue is reachable.
         """
+        if bridge.session is not None and bridge.mode_controller is not None:
+            # Dry run is a real session: the full pipeline runs and the broker
+            # discards the orders. Starting it here means the operator sees
+            # what the bot would do against live prices without choosing
+            # anything first.
+            with contextlib.suppress(Exception):
+                await bridge.session.start(bridge.mode_controller.broker)
+
         task: asyncio.Task | None = None
         if bridge.market_feed_enabled:
             from godalgo.ui.feed import MarketFeed
 
             task = asyncio.create_task(
-                MarketFeed(bridge, symbols=_watch_symbols(bridge)).run()
+                MarketFeed(
+                    bridge,
+                    exchange_id=_feed_exchange(bridge),
+                    symbols=_watch_symbols(bridge),
+                ).run()
             )
             bridge._feed_task = task
         try:
             yield
         finally:
+            if bridge.session is not None:
+                with contextlib.suppress(Exception):
+                    await bridge.session.stop()
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -398,6 +517,15 @@ def create_app(bridge: UIBridge) -> FastAPI:
         # indistinguishable from the key being ignored, which it used to be.
         results = await bridge.probe.check_credentials(credential, bridge.symbol)
         bridge.record_probe(results)
+
+        # Follow the venue the key names. Someone adding binance.us keys is
+        # saying where their account lives; polling binance.com for prices
+        # they cannot trade against would be showing the wrong market.
+        if credential.exchange_id != bridge.exchange_id:
+            bridge.exchange_id = credential.exchange_id
+            bridge.watchlist.clear()
+            await _restart_feed(bridge)
+
         return JSONResponse({
             "ok": True,
             "exchanges": bridge.credentials.listing(),
@@ -460,6 +588,59 @@ def create_app(bridge: UIBridge) -> FastAPI:
             "credential_tested": stored is not None,
         })
 
+    @app.post("/api/watchlist/refresh")
+    async def watchlist_refresh(payload: dict[str, Any] | None = None) -> JSONResponse:
+        """Poll the venue once, now, and report exactly what came back.
+
+        The poller runs on its own cadence, so without this the only way to
+        find out why the list is empty is to wait and guess. Switching venue
+        here also rebinds the background poller, which matters when the
+        default venue is blocked in your region and another is not.
+        """
+        from godalgo.ui.feed import MarketFeed
+
+        body = payload or {}
+        requested = str(body.get("exchange_id") or "").strip()
+        if requested and requested != bridge.exchange_id:
+            bridge.exchange_id = requested
+            bridge.watchlist.clear()
+            bridge.events.info("data", f"market data venue set to {requested}")
+            await _restart_feed(bridge)
+
+        feed = MarketFeed(
+            bridge,
+            exchange_id=_feed_exchange(bridge),
+            symbols=_watch_symbols(bridge),
+        )
+        try:
+            await feed._tick()
+        finally:
+            await feed._close()
+
+        status = bridge.venue_status.get("market_data") or {}
+        return JSONResponse({
+            "ok": bool(status.get("ok")),
+            "exchange_id": _feed_exchange(bridge),
+            "detail": status.get("detail", ""),
+            "kind": status.get("kind", ""),
+            "rows": len(bridge.watchlist),
+        })
+
+    @app.get("/api/session")
+    async def session_status() -> JSONResponse:
+        """What the trading loop is doing.
+
+        Separate from /api/mode because "which broker" and "is the loop
+        actually running" are different questions, and the second is the one
+        that goes unanswered when a bot appears to do nothing.
+        """
+        if bridge.session is None:
+            return JSONResponse({
+                "attached": False,
+                "reason": "this terminal is a viewer; no trading loop is attached",
+            })
+        return JSONResponse({"attached": True, **bridge.session.status()})
+
     @app.get("/api/events")
     async def events(limit: int = 80, since: int = 0) -> JSONResponse:
         return JSONResponse({
@@ -520,6 +701,18 @@ def create_app(bridge: UIBridge) -> FastAPI:
             f"mode is now {target.value}",
             "positions were flattened first" if change.flattened else "",
         )
+
+        # Re-broker the running loop, or the switch would change a label and
+        # nothing else -- which is what it used to do.
+        if bridge.session is not None:
+            try:
+                await bridge.session.start(bridge.mode_controller.broker)
+            except Exception as exc:
+                logger.exception("could not restart the trading session")
+                bridge.events.error(
+                    "engine", "mode changed but the session did not restart",
+                    str(exc)[:200],
+                )
         return JSONResponse({"ok": True, "change": change.to_dict(),
                              **bridge.mode_controller.status()})
 

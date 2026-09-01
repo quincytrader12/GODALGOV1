@@ -303,19 +303,60 @@ a node count flat at 594 over 40 seconds.
 A symbol the venue stops returning goes **grey**, not missing. A row that
 vanishes and reappears makes the list flicker and loses your place.
 
+### The trading loop runs in the terminal
+
+Until recently it did not, and that mattered: the mode switch changed a broker
+that nothing was attached to, so pressing LIVE changed a label and traded
+nothing. The bot lived behind `python -m godalgo live`, which is not what
+someone running a double-clicked executable is going to do.
+
+The terminal now owns a `LiveEngine`. The constraints are unchanged:
+
+* **The UI still cannot place an order.** It starts and stops a session; every
+  order decision belongs to the engine exactly as it does headless. There is
+  still one path to the exchange.
+* **The engine is autonomous, not a remote control.** Nothing in the interface
+  can push a target weight, size, or side into it.
+* **A display failure cannot break trading.** Fills reach the screen through an
+  observer whose exceptions are swallowed inside the engine.
+
+**Dry run is a real session.** The full pipeline runs — data, regime, signals,
+sizing, risk, routing — and the broker discards the orders at the last step. So
+you can watch what the bot *would* have done, against live prices, before
+funding anything.
+
+The header carries a session pill separate from the mode pill, because "which
+broker" and "is the loop actually running" are different questions and the
+second is the one a seemingly idle bot leaves unanswered:
+
+| Pill | Meaning |
+|---|---|
+| `VIEWER` | No loop attached (demo mode) |
+| `WARMING UP` | Running, but below the strategies' warm-up — it cannot signal yet |
+| `TRADING` | Running and able to act |
+| `STOPPED` | The loop died; the reason is in Activity |
+
+`WARMING UP` and `TRADING` are distinguished deliberately: warming up resolves
+itself, whereas a warmed-up bot placing no orders is a bot deciding not to
+trade, and those need very different responses from you.
+
 ### Status lamps and the activity log
 
 Four lamps in the header, deliberately not one: an unreachable venue, stale
 data, a rejected key and an unconfigured Telegram are four different problems
 needing four different actions, and sharing an indicator would hide that.
 
-| Lamp | Green when |
-|---|---|
-| `LINK` | the browser is streaming from the terminal |
-| `VENUE` | the exchange is reachable |
-| `DATA` | prices are arriving (amber if they go stale) |
-| `KEY` | a stored key passed its balance read |
-| `TG` | Telegram is connected |
+| Lamp | Green when | Other states |
+|---|---|---|
+| `LINK` | the browser is streaming from the terminal | cyan pulse while reconnecting |
+| `VENUE` | the exchange is reachable | red with the reason |
+| `DATA` | prices are arriving | amber if they go stale |
+| `KEY` | a stored key passed its balance read | amber = stored but never tested; cyan pulse = testing; grey = no key |
+| `TG` | Telegram is connected | grey = not configured |
+
+The `KEY` lamp has four states rather than two on purpose. "Never tested" and
+"tested and failed" are different facts, and a single grey lamp meaning both
+tells you nothing — which is exactly what it did.
 
 The **Activity** panel is the running record: every venue call, credential
 change, mode switch and failure, with the remedy rather than just the symptom.

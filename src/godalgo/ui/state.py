@@ -435,6 +435,10 @@ class UISnapshot:
     watchlist: list[WatchedSymbol] = field(default_factory=list)
     """Instruments the bot is tracking, best-ranked first."""
 
+    has_keys: bool = False
+    """Whether any credential is stored. Distinguishes "no key" from "key not
+    tested yet", which the lamps must not conflate."""
+
     venue: dict[str, Any] = field(default_factory=dict)
     """Per-check connection state, rendered as the status lamps."""
 
@@ -476,6 +480,7 @@ class UISnapshot:
                 "last_price": round(self.last_price, 8),
             },
             "watchlist": [w.to_dict() for w in self.watchlist],
+            "has_keys": self.has_keys,
             "venue": self.venue,
             "events": self.events,
         }

@@ -47,25 +47,38 @@ def main() -> int:
         help="populate with fabricated positions -- nothing is traded",
     )
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--bar-seconds", type=int, default=60,
+        help="decision cadence; the bot acts once per completed bar",
+    )
     args = parser.parse_args()
 
     import threading
 
-    from godalgo.ui.server import UIBridge, run_server
+    from godalgo.ui.server import UIBridge, build_terminal, run_server
     from godalgo.ui.simulator import Simulator
-
-    bridge = UIBridge(starting_equity=args.equity, equity=args.equity)
-    bridge.symbol = args.symbol
 
     if args.demo:
         import asyncio
 
+        bridge = UIBridge(
+            starting_equity=args.equity, equity=args.equity,
+            market_feed_enabled=False,
+        )
+        bridge.symbol = args.symbol
         simulator = Simulator(bridge)
         simulator.seed_history()
         threading.Thread(
             target=lambda: asyncio.run(simulator.run()), daemon=True
         ).start()
         print("demo mode: positions are fabricated, not traded")
+    else:
+        # The real thing: a mode controller reading the credential store, and
+        # a trading loop the mode switch actually drives. Without both, the
+        # LIVE button is disabled and switching modes changes only a label.
+        bridge = build_terminal(
+            symbol=args.symbol, equity=args.equity, bar_seconds=args.bar_seconds,
+        )
 
     print(f"GODALGO terminal -> http://127.0.0.1:{args.port}")
     print("loopback only; this process holds credentials and has no auth")

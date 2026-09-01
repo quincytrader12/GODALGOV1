@@ -41,6 +41,7 @@ from godalgo.execution.reconcile import Reconciler
 from godalgo.execution.router import OrderRouter, RoutingConfig, RoutingDecision
 from godalgo.execution.types import (
     Order,
+    OrderResult,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -195,6 +196,17 @@ class LiveEngine:
         self._warmup = max(momentum.warmup, reversion.warmup, self.config.regime_window)
         self._session: SessionProfile | None = None
         self._session_fitted_at_bar = -1
+
+        self.on_fill: Callable[[str, float, float, float], None] | None = None
+        """Optional observer, called ``(symbol, signed_qty, price, fee)`` after
+        every fill.
+
+        An observer, not a participant: it is called after the order has
+        settled, its return value is ignored, and an exception it raises is
+        logged and swallowed. A display that can break the trading loop is a
+        worse display than none, and this exists so the terminal can render
+        what the engine is doing.
+        """
 
         self.target_clamp: Callable[[str, float], float] | None = None
         """Optional portfolio-level clamp, set by a supervisor.
@@ -564,6 +576,7 @@ class LiveEngine:
             self.router.mark_settled(self.config.symbol)
 
         self.state.orders_sent += 1
+        self._notify_fill(result)
 
         if result.status is OrderStatus.UNKNOWN:
             # The order may be live. Do not send anything else until the venue
@@ -573,6 +586,25 @@ class LiveEngine:
             logger.warning("order rejected: %s", result.error)
 
         return decision
+
+    def _notify_fill(self, result: OrderResult) -> None:
+        """Tell the observer about a fill, and never let it matter.
+
+        Anything the observer raises is logged and dropped: the order has
+        already settled at the venue by this point, so an exception here could
+        only corrupt the engine's view of a position that really exists.
+        """
+        if self.on_fill is None or not result.filled_amount:
+            return
+        price = result.average_price
+        if not price:
+            return
+        try:
+            self.on_fill(
+                self.config.symbol, result.signed_filled, float(price), result.fee
+            )
+        except Exception:
+            logger.exception("fill observer failed; ignoring")
 
     # -- safety -----------------------------------------------------------
 

@@ -1318,14 +1318,17 @@ function summariseChecks(checks) {
 
 async function testConnection(key) {
   checkResults.set(key, { pending: true });
+  keyPending = true;
   loadConnections();
-  setLamp('lamp-key', 'busy');
+  setLamp('lamp-key', 'busy', 'testing the key…');
   try {
     const r = await fetch(`/api/connections/${encodeURIComponent(key)}/test`, { method: 'POST' });
     const d = await r.json();
     checkResults.set(key, { ok: d.ok, text: summariseChecks(d.checks || []) });
   } catch (err) {
     checkResults.set(key, { ok: false, text: 'the terminal could not run the check' });
+  } finally {
+    keyPending = false;
   }
   loadConnections();
 }
@@ -1342,8 +1345,21 @@ $('k-check').addEventListener('click', async () => {
       body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'binance' }),
     });
     const d = await r.json();
-    msg.className = 'note ' + (d.ok ? 'ok' : 'warn');
-    msg.textContent = summariseChecks(d.checks || []);
+
+    // Refresh the watchlist in the same click. Testing the venue and then
+    // waiting for the next poll to see whether prices arrived makes the
+    // button feel like it did nothing.
+    const w = await (await fetch('/api/watchlist/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'binance' }),
+    })).json();
+
+    const lines = summariseChecks(d.checks || []);
+    msg.className = 'note ' + (d.ok && w.ok ? 'ok' : 'warn');
+    msg.textContent = lines + '\n'
+      + (w.ok ? `\u2713 watchlist: ${w.rows} symbols from ${w.exchange_id}`
+              : `\u2717 watchlist: ${w.detail || 'no prices'}`);
   } catch (err) {
     msg.className = 'note warn';
     msg.textContent = 'the terminal could not reach its own API';
@@ -1435,6 +1451,8 @@ $('t-digest').addEventListener('click', async () => {
 
 /* ------------------------------------------------- lamps and activity */
 
+let keyPending = false;
+
 function setLamp(id, state, title) {
   const el = $(id);
   if (!el) return;
@@ -1467,11 +1485,22 @@ function renderLamps(snap) {
   }
   setLamp('lamp-data', dataState, dataTitle);
 
-  setLamp('lamp-key',
-    credentials === undefined ? 'off' : (credentials.ok ? 'ok' : 'bad'),
-    credentials === undefined
-      ? 'no key tested yet — the bot can still read public market data'
-      : (credentials.detail || ''));
+  // Four states, not two. "Never tested" and "tested and failed" are
+  // different facts, and a grey lamp that means both tells the operator
+  // nothing -- which is exactly what it did.
+  let keyState = 'off';
+  let keyTitle = 'no key added yet — click TEST on a key to check it';
+  if (keyPending) {
+    keyState = 'busy';
+    keyTitle = 'testing the key…';
+  } else if (credentials !== undefined) {
+    keyState = credentials.ok ? 'ok' : 'bad';
+    keyTitle = credentials.detail || '';
+  } else if (snap.has_keys) {
+    keyState = 'warn';
+    keyTitle = 'key stored but not tested yet — click TEST on it';
+  }
+  setLamp('lamp-key', keyState, keyTitle);
 
   const price = snap.brain ? snap.brain.last_price : 0;
   $('h-price').textContent = price
@@ -1609,6 +1638,38 @@ async function loadMode() {
 
 const refreshMode = loadMode;
 
+let sessionState = { attached: false };
+
+async function loadSession() {
+  try {
+    sessionState = await (await fetch('/api/session')).json();
+  } catch { /* server not up yet */ }
+  renderSession();
+}
+
+function renderSession() {
+  const pill = $('h-session');
+  if (!pill) return;
+  if (!sessionState.attached) {
+    pill.textContent = 'VIEWER';
+    pill.className = 'mode-pill';
+    pill.title = sessionState.reason || 'no trading loop attached';
+    return;
+  }
+  const running = sessionState.running;
+  const warm = sessionState.warmed_up;
+  // Warming up and seeing no opportunity look identical from outside and
+  // mean completely different things, so they get different labels.
+  pill.textContent = !running ? 'STOPPED' : (warm ? 'TRADING' : 'WARMING UP');
+  pill.className = 'mode-pill ' + (!running ? 'bad' : (warm ? 'ok' : 'warn'));
+  pill.title = running
+    ? `${sessionState.symbol} · ${sessionState.bars} bars · `
+      + `${(sessionState.engine || {}).orders_sent || 0} orders sent`
+    : 'the trading loop is not running';
+}
+
+setInterval(loadSession, 5000);
+
 function renderMode() {
   document.querySelectorAll('#mode-switch button').forEach((b) => {
     b.classList.toggle('active', b.dataset.mode === modeState.mode);
@@ -1690,4 +1751,5 @@ document.addEventListener('keydown', (e) => {
 });
 
 loadMode();
+loadSession();
 setInterval(loadMode, 10000);
