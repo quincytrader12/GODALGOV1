@@ -37,7 +37,10 @@ if TYPE_CHECKING:
     from godalgo.ui.credentials import ExchangeCredential
     from godalgo.ui.events import EventLog
 
-__all__ = ["ProbeResult", "VenueProbe", "classify_error", "raw_error"]
+__all__ = [
+    "ProbeResult", "VenueProbe", "classify_error", "normalise_exchange_id",
+    "raw_error", "suggest_exchange_ids",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,56 @@ class ProbeResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# What people type, and what ccxt calls it. ccxt ids are lowercase and have no
+# punctuation; "Binance" fails with a message that names an attribute rather
+# than the mistake, which is not something an operator can be expected to
+# translate.
+_ALIASES: dict[str, str] = {
+    "binance.us": "binanceus",
+    "binance us": "binanceus",
+    "binanceus.com": "binanceus",
+    "coinbasepro": "coinbase",
+    "coinbase pro": "coinbase",
+    "gdax": "coinbase",
+    "kucoin.com": "kucoin",
+    "okex": "okx",
+    "bybit.com": "bybit",
+}
+
+
+def normalise_exchange_id(value: str) -> str:
+    """Turn what a person typed into the id ccxt expects.
+
+    ccxt exchange ids are lowercase with no spaces or dots. Passing "Binance"
+    through raises ``module 'ccxt.async_support' has no attribute 'Binance'``,
+    which names an attribute rather than the mistake and is not something an
+    operator should have to decode. Worse, an id like that can be *stored* --
+    and then every later lookup fails identically, so a single capital letter
+    reads as the exchange being down.
+    """
+    cleaned = (value or "").strip().lower()
+    cleaned = _ALIASES.get(cleaned, cleaned)
+    # ccxt ids contain only letters and digits.
+    return "".join(c for c in cleaned if c.isalnum())
+
+
+def suggest_exchange_ids(value: str, limit: int = 3) -> list[str]:
+    """Ids close to what was typed, for an error message worth reading."""
+    import difflib
+
+    import ccxt
+
+    return difflib.get_close_matches(
+        normalise_exchange_id(value), ccxt.exchanges, n=limit, cutoff=0.5
+    )
+
+
+def known_exchange(exchange_id: str) -> bool:
+    import ccxt
+
+    return exchange_id in ccxt.exchanges
 
 
 def raw_error(exc: BaseException) -> str:
@@ -176,21 +229,24 @@ class VenueProbe:
         """
         import ccxt.async_support as accxt
 
+        requested, exchange_id = exchange_id, normalise_exchange_id(exchange_id)
         results: list[ProbeResult] = []
-        try:
-            exchange = getattr(accxt, exchange_id)({
-                "enableRateLimit": True,
-                "timeout": int(self.timeout * 1000),
-                # ccxt ignores the system proxy without this.
-                "aiohttp_trust_env": True,
-            })
-        except AttributeError:
-            result = ProbeResult(
-                "reachable", False, f"unknown exchange {exchange_id!r}",
-                kind="bad_exchange",
+
+        if not known_exchange(exchange_id):
+            hint = suggest_exchange_ids(requested)
+            detail = (
+                f"{requested!r} is not an exchange ccxt knows"
+                + (f" — did you mean {' or '.join(hint)}?" if hint else "")
             )
-            self.events.error("venue", f"unknown exchange {exchange_id!r}")
-            return [result]
+            self.events.error("venue", "unknown exchange", detail)
+            return [ProbeResult("reachable", False, detail, kind="bad_exchange")]
+
+        exchange = getattr(accxt, exchange_id)({
+            "enableRateLimit": True,
+            "timeout": int(self.timeout * 1000),
+            # ccxt ignores the system proxy without this.
+            "aiohttp_trust_env": True,
+        })
 
         try:
             results.append(await self._market_count(exchange, exchange_id))
@@ -221,8 +277,11 @@ class VenueProbe:
             # failure would be reported as an auth problem it is not.
             return results
 
+        exchange_id = normalise_exchange_id(credential.exchange_id)
+        if not known_exchange(exchange_id):
+            return results
         try:
-            exchange = getattr(accxt, credential.exchange_id)({
+            exchange = getattr(accxt, exchange_id)({
                 "apiKey": credential.api_key,
                 "secret": credential.api_secret,
                 "password": credential.passphrase or None,

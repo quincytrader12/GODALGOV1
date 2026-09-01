@@ -380,6 +380,26 @@ used", so the property survives a change of mechanism. It also asserts the
 decision is still genuinely expensive — if it ever becomes cheap the offload
 is unnecessary, and a test that passes for the wrong reason is worse than none.
 
+### Exchange ids
+
+ccxt ids are **lowercase** — `binance`, `binanceus`, `kraken`. The terminal
+normalises what you type (`Binance`, `BINANCE`, `Binance.US`, `Coinbase Pro`
+all resolve), and rejects a genuine typo with suggestions rather than storing
+it.
+
+This matters more than it sounds. An id typed as `Binance` used to be saved
+that way, and every later lookup then failed with:
+
+```
+module 'ccxt.async_support' has no attribute 'Binance'
+```
+
+— a message naming an attribute rather than the mistake. Because the market
+feed follows the *stored* venue, one capital letter took market data down
+completely and retried every five seconds forever. Ids already stored wrong
+are repaired on load, so an operator who hit this does not have to work out
+that the fix is to delete and retype a key that looks correct on screen.
+
 ### When market data will not load
 
 **Diagnose connection**, in the Connections panel, tests each layer separately

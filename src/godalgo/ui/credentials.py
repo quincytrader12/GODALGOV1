@@ -33,7 +33,7 @@ import os
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,13 @@ __all__ = ["CredentialStore", "ExchangeCredential"]
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DIR = Path.home() / ".godalgo"
+
+
+def _normalise_exchange_id(value: str) -> str:
+    """Local copy of the venue helper, to keep storage free of a UI import."""
+    from godalgo.ui.venue import normalise_exchange_id
+
+    return normalise_exchange_id(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,11 +176,27 @@ class CredentialStore:
         loaded: dict[str, ExchangeCredential] = {}
         for key, value in entries.items():
             try:
-                loaded[key] = ExchangeCredential(**value)
+                credential = ExchangeCredential(**value)
             except TypeError:
                 # One malformed entry must not cost the operator every other
                 # key in the file.
                 logger.error("skipping malformed credential entry %r", key)
+                continue
+
+            # Repair an id stored before it was normalised. A key saved as
+            # "Binance" made every later lookup fail with an attribute error,
+            # and since the market feed follows the stored venue, one capital
+            # letter took the whole terminal offline. Fixing it on load means
+            # an operator who already hit that does not have to work out that
+            # the fix is to delete and retype the key.
+            fixed = _normalise_exchange_id(credential.exchange_id)
+            if fixed != credential.exchange_id:
+                logger.info(
+                    "normalised stored exchange id %r -> %r",
+                    credential.exchange_id, fixed,
+                )
+                credential = replace(credential, exchange_id=fixed)
+            loaded[key] = credential
         self._credentials = loaded
 
     def save(self) -> None:
@@ -214,6 +237,12 @@ class CredentialStore:
             )
 
     def add(self, credential: ExchangeCredential) -> None:
+        # Normalise before storing, not just before use: a bad id written to
+        # disk outlives the session that made the mistake.
+        credential = replace(
+            credential,
+            exchange_id=_normalise_exchange_id(credential.exchange_id),
+        )
         key = credential.label or credential.exchange_id
         self._credentials[key] = credential
         self.save()

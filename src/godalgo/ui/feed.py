@@ -109,6 +109,23 @@ class MarketFeed:
         if self._exchange is None:
             import ccxt.async_support as accxt
 
+            from godalgo.ui.venue import known_exchange, normalise_exchange_id
+
+            # A bad id is not a transient failure and must not be retried
+            # forever. One saved as "Binance" made every tick raise an
+            # attribute error every five seconds, which read as the venue
+            # being down when it was a capital letter. Fall back to a venue
+            # that exists, loudly, so data keeps flowing.
+            wanted = normalise_exchange_id(self.exchange_id)
+            if not known_exchange(wanted):
+                self.bridge.events.error(
+                    "data", f"unknown exchange {self.exchange_id!r}",
+                    "falling back to binance for market data; fix the exchange "
+                    "id in Connections",
+                )
+                wanted = "binance"
+            self.exchange_id = wanted
+
             # ccxt leaves aiohttp's trust_env off, so it ignores HTTPS_PROXY and the
             # system proxy entirely. On a machine behind a corporate proxy, a VPN
             # client, or antivirus that intercepts TLS, every request fails while the

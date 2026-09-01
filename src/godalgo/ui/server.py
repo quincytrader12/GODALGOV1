@@ -389,11 +389,19 @@ def _feed_exchange(bridge: UIBridge) -> str:
     keys is telling us where their account lives, and polling binance.com for
     prices they cannot trade against would be showing them the wrong market.
     """
+    from godalgo.ui.venue import known_exchange, normalise_exchange_id
+
     stored = bridge.credentials.tradeable()
     if stored is None:
         entries = bridge.credentials.items()
         stored = entries[0][1] if entries else None
-    return getattr(stored, "exchange_id", None) or bridge.exchange_id
+
+    candidate = normalise_exchange_id(
+        getattr(stored, "exchange_id", None) or bridge.exchange_id
+    )
+    # Never hand an unusable id to the feed. A stored typo would otherwise
+    # take market data down entirely rather than degrading to the default.
+    return candidate if known_exchange(candidate) else "binance"
 
 
 def _watch_symbols(bridge: UIBridge) -> list[str]:
@@ -581,8 +589,12 @@ def create_app(bridge: UIBridge) -> FastAPI:
         Needs no key and no funds, which is the point: it settles "is this
         actually talking to the exchange" before any decision to deposit.
         """
+        from godalgo.ui.venue import normalise_exchange_id
+
         body = payload or {}
-        exchange_id = str(body.get("exchange_id") or "binance").strip()
+        exchange_id = normalise_exchange_id(
+            str(body.get("exchange_id") or "binance")
+        )
         symbol = str(body.get("symbol") or bridge.symbol).strip()
 
         results = await bridge.probe.check_public(exchange_id, symbol)
@@ -606,9 +618,19 @@ def create_app(bridge: UIBridge) -> FastAPI:
         default venue is blocked in your region and another is not.
         """
         from godalgo.ui.feed import MarketFeed
+        from godalgo.ui.venue import known_exchange, normalise_exchange_id
 
         body = payload or {}
-        requested = str(body.get("exchange_id") or "").strip()
+        requested = normalise_exchange_id(str(body.get("exchange_id") or ""))
+        if requested and not known_exchange(requested):
+            from godalgo.ui.venue import suggest_exchange_ids
+
+            hint = suggest_exchange_ids(str(body.get("exchange_id") or ""))
+            raise HTTPException(
+                status_code=400,
+                detail=f"{body.get('exchange_id')!r} is not an exchange ccxt knows"
+                + (f" — did you mean {' or '.join(hint)}?" if hint else ""),
+            )
         if requested and requested != bridge.exchange_id:
             bridge.exchange_id = requested
             bridge.watchlist.clear()
@@ -644,9 +666,12 @@ def create_app(bridge: UIBridge) -> FastAPI:
         a specific remedy rather than a guess.
         """
         from godalgo.ui.diagnostics import run_diagnostics
+        from godalgo.ui.venue import normalise_exchange_id
 
         body = payload or {}
-        exchange_id = str(body.get("exchange_id") or _feed_exchange(bridge)).strip()
+        exchange_id = normalise_exchange_id(
+            str(body.get("exchange_id") or "") or _feed_exchange(bridge)
+        )
         report = await run_diagnostics(exchange_id)
 
         bridge.events.record(
