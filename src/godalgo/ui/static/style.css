@@ -714,3 +714,25 @@ html, body {
 .mode-pill.ok   { color: var(--green); border-color: var(--green); }
 .mode-pill.warn { color: var(--amber); border-color: var(--amber); }
 .mode-pill.bad  { color: var(--red);   border-color: var(--red); }
+
+/* Diagnostic output. Monospace and selectable: its whole purpose is to be
+   read carefully and pasted into a bug report. */
+.diag {
+  margin: 6px 0 0;
+  padding: 8px 9px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+  user-select: text;
+}
+.diag .ok   { color: var(--green); }
+.diag .bad  { color: var(--red); }
+.diag .verdict { color: var(--text-bright); display: block; margin-top: 6px; }

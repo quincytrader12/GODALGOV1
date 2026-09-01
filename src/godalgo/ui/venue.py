@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from godalgo.ui.credentials import ExchangeCredential
     from godalgo.ui.events import EventLog
 
-__all__ = ["ProbeResult", "VenueProbe", "classify_error"]
+__all__ = ["ProbeResult", "VenueProbe", "classify_error", "raw_error"]
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,17 @@ class ProbeResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def raw_error(exc: BaseException) -> str:
+    """The exception, as thrown, for a bug report.
+
+    The friendly explanations below are for acting on; this is for diagnosing.
+    Reporting only the friendly text was a mistake -- "could not reach the
+    venue" covers DNS failure, a proxy, TLS interception, a geo-block and a
+    firewall, and discards the one string that tells them apart.
+    """
+    return f"{type(exc).__name__}: {exc}"[:300]
 
 
 def classify_error(exc: BaseException) -> tuple[str, str]:
@@ -170,6 +181,8 @@ class VenueProbe:
             exchange = getattr(accxt, exchange_id)({
                 "enableRateLimit": True,
                 "timeout": int(self.timeout * 1000),
+                # ccxt ignores the system proxy without this.
+                "aiohttp_trust_env": True,
             })
         except AttributeError:
             result = ProbeResult(
@@ -215,6 +228,8 @@ class VenueProbe:
                 "password": credential.passphrase or None,
                 "enableRateLimit": True,
                 "timeout": int(self.timeout * 1000),
+                # ccxt ignores the system proxy without this.
+                "aiohttp_trust_env": True,
             })
         except AttributeError:
             return results
@@ -241,7 +256,10 @@ class VenueProbe:
             )
         except Exception as exc:  # noqa: BLE001 - classified and reported
             kind, explanation = _classify(exc)
-            self.events.error("venue", f"cannot reach {exchange_id}", explanation)
+            self.events.error(
+                "venue", f"cannot reach {exchange_id}",
+                f"{explanation} [{raw_error(exc)}]",
+            )
             return ProbeResult(
                 "reachable", False, explanation,
                 (time.monotonic() - started) * 1000, kind,
@@ -267,7 +285,10 @@ class VenueProbe:
             )
         except Exception as exc:  # noqa: BLE001 - classified and reported
             kind, explanation = _classify(exc)
-            self.events.warn("data", f"no market data for {symbol}", explanation)
+            self.events.warn(
+                "data", f"no market data for {symbol}",
+                f"{explanation} [{raw_error(exc)}]",
+            )
             return ProbeResult(
                 "market_data", False, explanation,
                 (time.monotonic() - started) * 1000, kind,
@@ -297,7 +318,8 @@ class VenueProbe:
             kind, explanation = _classify(exc)
             self.events.error(
                 "credentials",
-                f"{credential.exchange_id} rejected the key", explanation,
+                f"{credential.exchange_id} rejected the key",
+                f"{explanation} [{raw_error(exc)}]",
             )
             return ProbeResult(
                 "credentials", False, explanation,

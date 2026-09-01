@@ -109,8 +109,13 @@ class MarketFeed:
         if self._exchange is None:
             import ccxt.async_support as accxt
 
+            # ccxt leaves aiohttp's trust_env off, so it ignores HTTPS_PROXY and the
+            # system proxy entirely. On a machine behind a corporate proxy, a VPN
+            # client, or antivirus that intercepts TLS, every request fails while the
+            # browser beside it works -- which reads as "the exchange is down".
             self._exchange = getattr(accxt, self.exchange_id)({
                 "enableRateLimit": True, "timeout": 15_000,
+                "aiohttp_trust_env": True,
             })
         return self._exchange
 
@@ -178,13 +183,14 @@ class MarketFeed:
             )
 
     def _on_failure(self, exc: BaseException) -> None:
-        from godalgo.ui.venue import classify_error
+        from godalgo.ui.venue import classify_error, raw_error
 
         self._consecutive_failures += 1
         self.bridge.connected = False
         kind, explanation = classify_error(exc)
         self.bridge.venue_status["market_data"] = {
-            "name": "market_data", "ok": False, "detail": explanation, "kind": kind,
+            "name": "market_data", "ok": False, "detail": explanation,
+            "kind": kind, "raw": raw_error(exc),
         }
         # Only a transport-level failure implicates the venue itself. A bad
         # symbol or a rate limit means we reached it perfectly well, and
@@ -202,7 +208,7 @@ class MarketFeed:
             self.bridge.events.warn(
                 "data",
                 f"market data unavailable ({self._consecutive_failures}x)",
-                explanation,
+                f"{explanation} [{raw_error(exc)}]",
             )
 
         # Force a fresh client next tick: a poisoned aiohttp session survives

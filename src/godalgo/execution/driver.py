@@ -148,7 +148,10 @@ class WebSocketDriver:
             klass = getattr(ccxtpro, self.config.exchange_id)
             # Public market data needs no credentials, and a data driver that
             # cannot authenticate cannot place an order by accident.
-            self._exchange = klass({"enableRateLimit": True})
+            self._exchange = klass({
+                # Without this ccxt ignores the system proxy; see ui/feed.py.
+                "enableRateLimit": True, "aiohttp_trust_env": True,
+            })
 
         self._bar_ready = asyncio.Event()
         self._stop = asyncio.Event()

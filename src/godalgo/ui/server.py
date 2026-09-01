@@ -634,6 +634,29 @@ def create_app(bridge: UIBridge) -> FastAPI:
             "rows": len(bridge.watchlist),
         })
 
+    @app.post("/api/diagnostics")
+    async def diagnostics(payload: dict[str, Any] | None = None) -> JSONResponse:
+        """Find out which layer is failing, and say so in plain terms.
+
+        "Could not reach the venue" covers DNS failure, a proxy, TLS
+        interception, a geo-block and a firewall. This tests each layer
+        separately and reports the raw error from every one, so the answer is
+        a specific remedy rather than a guess.
+        """
+        from godalgo.ui.diagnostics import run_diagnostics
+
+        body = payload or {}
+        exchange_id = str(body.get("exchange_id") or _feed_exchange(bridge)).strip()
+        report = await run_diagnostics(exchange_id)
+
+        bridge.events.record(
+            "good" if report["ok"] else "error", "venue",
+            f"diagnostics on {exchange_id}: "
+            + ("all layers reachable" if report["ok"] else "a layer failed"),
+            report["verdict"][:300],
+        )
+        return JSONResponse(report)
+
     @app.get("/api/session")
     async def session_status() -> JSONResponse:
         """What the trading loop is doing.

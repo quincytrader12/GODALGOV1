@@ -380,6 +380,39 @@ used", so the property survives a change of mechanism. It also asserts the
 decision is still genuinely expensive — if it ever becomes cheap the offload
 is unnecessary, and a test that passes for the wrong reason is worse than none.
 
+### When market data will not load
+
+**Diagnose connection**, in the Connections panel, tests each layer separately
+and reports the raw error from every one. "Could not reach the venue" covers
+six different problems with six different remedies; this says which:
+
+| Layer | What it proves |
+|---|---|
+| `environment` | ccxt/aiohttp versions, and whether a proxy is configured |
+| `dns` | this machine can resolve the venue's hostname |
+| `stdlib_https` | a plain GET works, using the system trust store **and** proxy settings |
+| `aiohttp_https` | the client ccxt uses, with proxy settings ignored — its default |
+| `aiohttp_https_trust_env` | the same client, honouring proxy settings |
+| `ccxt` | the call the terminal actually makes |
+
+The first failure locates the fault. DNS failing is a firewall or VPN, not the
+bot. Everything failing means the region or network is blocking it, and no
+change here will help — Binance restricts several countries, so try
+`binanceus` or `kraken` in the exchange field. Only `ccxt` failing means the
+bug is ours.
+
+An HTTP reply is **not** counted as success. An intercepting proxy or filter
+answers with its own 403 block page, and a tick beside that would be a tick
+beside the thing preventing the connection.
+
+Proxy variables are reported by name only, never by value — a proxy URL can
+embed credentials and this output is meant to be pasted into a bug report.
+
+**ccxt ignores system proxy settings by default** (`aiohttp_trust_env` is off),
+so behind a corporate proxy, a VPN client, or antivirus that intercepts TLS,
+every request fails while the browser beside it works. The terminal now
+enables it everywhere ccxt is constructed.
+
 ### Status lamps and the activity log
 
 Four lamps in the header, deliberately not one: an unreachable venue, stale

@@ -168,7 +168,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     from godalgo.execution.broker import FeeSchedule
     from godalgo.strategies.momentum import MomentumStrategy
 
-    exchange = getattr(ccxt, args.exchange)({"enableRateLimit": True})
+    exchange = getattr(ccxt, args.exchange)({
+        "enableRateLimit": True, "aiohttp_trust_env": True,
+    })
     print(f"loading markets from {args.exchange} ...", file=sys.stderr)
     try:
         markets = exchange.load_markets()

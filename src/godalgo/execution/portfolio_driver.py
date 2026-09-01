@@ -110,7 +110,7 @@ class PortfolioDriver:
             if self.config.exchange_id not in ccxtpro.exchanges:
                 raise ValueError(f"{self.config.exchange_id!r} is not a ccxt.pro exchange")
             self._exchange = getattr(ccxtpro, self.config.exchange_id)(
-                {"enableRateLimit": True}
+                {"enableRateLimit": True, "aiohttp_trust_env": True}
             )
 
         # The fleet shares one exchange, so a per-driver exchange id would be

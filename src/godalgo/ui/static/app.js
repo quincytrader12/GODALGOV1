@@ -1366,6 +1366,37 @@ $('k-check').addEventListener('click', async () => {
   }
 });
 
+$('k-diag').addEventListener('click', async () => {
+  const out = $('k-diag-out');
+  out.hidden = false;
+  out.textContent = 'testing DNS, HTTPS, proxy and ccxt…';
+  try {
+    const r = await fetch('/api/diagnostics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'binance' }),
+    });
+    const d = await r.json();
+    // Built as nodes, not innerHTML: the raw error text is exchange output
+    // and may contain anything at all.
+    out.textContent = '';
+    for (const step of d.steps || []) {
+      const line = document.createElement('div');
+      line.className = step.ok ? 'ok' : 'bad';
+      line.textContent = `${step.ok ? '\u2713' : '\u2717'} ${step.name}`
+        + `  ${Math.round(step.elapsed_ms)}ms  ${step.detail}`
+        + (step.error_type ? `  (${step.error_type})` : '');
+      out.appendChild(line);
+    }
+    const verdict = document.createElement('b');
+    verdict.className = 'verdict';
+    verdict.textContent = d.verdict || '';
+    out.appendChild(verdict);
+  } catch (err) {
+    out.textContent = 'the terminal could not run its own diagnostics';
+  }
+});
+
 $('k-add').addEventListener('click', async () => {
   const payload = {
     exchange_id: $('k-ex').value.trim(),

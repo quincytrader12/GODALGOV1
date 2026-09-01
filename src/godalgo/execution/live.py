@@ -137,6 +137,8 @@ class LiveBroker(Broker):
                 "password": passphrase or None,
                 "enableRateLimit": True,
                 "timeout": self.config.request_timeout_ms,
+                # ccxt ignores the system proxy without this.
+                "aiohttp_trust_env": True,
                 "options": {"defaultType": self.config.symbol_type},
             }
         )

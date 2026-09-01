@@ -99,7 +99,13 @@ class OHLCVFeed:
             if self.exchange_id not in ccxt.exchanges:
                 raise ValueError(f"unknown ccxt exchange {self.exchange_id!r}")
             klass = getattr(ccxt, self.exchange_id)
-            self._exchange = klass({"enableRateLimit": self.rate_limit})
+            # ccxt leaves aiohttp's trust_env off, so it ignores HTTPS_PROXY and the
+            # system proxy entirely. On a machine behind a corporate proxy, a VPN
+            # client, or antivirus that intercepts TLS, every request fails while the
+            # browser beside it works -- which reads as "the exchange is down".
+            self._exchange = klass({
+                "enableRateLimit": self.rate_limit, "aiohttp_trust_env": True,
+            })
         return self._exchange
 
     def supports_ohlcv(self) -> bool:

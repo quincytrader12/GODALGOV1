@@ -164,6 +164,11 @@
           <button class="ghost wide" id="k-check">Test venue connection</button>
           <p class="note">Reads only — reachability, a live price, and your
              balance. No order is placed and no funds are needed.</p>
+          <button class="ghost wide" id="k-diag">Diagnose connection</button>
+          <p class="note">Run this if market data will not load. It tests DNS,
+             HTTPS, the proxy and ccxt separately and names which one is
+             failing.</p>
+          <pre class="diag" id="k-diag-out" hidden></pre>
 
           <div class="pair">
             <input type="text" id="k-ex"    placeholder="exchange id" autocomplete="off" value="binance">
