@@ -166,6 +166,14 @@ class TradingSession:
         """Fetch history so the engine can signal now rather than in hours."""
         from godalgo.data.feed import OHLCVFeed
 
+        if self.exchange_id == "alpaca":
+            bars = await self._seed_alpaca()
+            if bars is None:
+                return
+            engine.seed_history(bars)
+            self._report_seed(engine)
+            return
+
         def fetch():
             feed = OHLCVFeed(exchange_id=self.exchange_id)
             return feed.fetch(self.symbol, _timeframe(self.bar_seconds),
@@ -186,6 +194,9 @@ class TradingSession:
         if bars is None or bars.empty:
             return
         engine.seed_history(bars)
+        self._report_seed(engine)
+
+    def _report_seed(self, engine: Any) -> None:
         ready = engine.bars.n_complete > engine._warmup
         self.bridge.events.record(
             "good" if ready else "warn", "engine",
@@ -193,6 +204,47 @@ class TradingSession:
             "ready to signal" if ready
             else f"still below the {engine._warmup} bar warm-up",
         )
+
+    async def _seed_alpaca(self) -> Any:
+        """History from Alpaca, which needs a key even to read it.
+
+        Returned as a frame shaped exactly like the ccxt path's, so the engine
+        cannot tell which venue it came from -- the moment those two diverge,
+        a backtest stops being evidence about the live run.
+        """
+        import pandas as pd
+
+        from godalgo.ui.alpaca_probes import client_for
+
+        credential = self.bridge.credentials.first_for("alpaca")
+        if credential is None:
+            self.bridge.events.warn(
+                "engine", "cannot seed history without an Alpaca key",
+                "Alpaca serves market data to authenticated requests only. Add "
+                "a key in Connections; the bot will warm up from live bars "
+                "meanwhile, which takes far longer.",
+            )
+            return None
+
+        client = client_for(credential)
+        try:
+            rows = await client.bars(
+                self.symbol, _alpaca_timeframe(self.bar_seconds), limit=_SEED_BARS
+            )
+        except Exception as exc:  # noqa: BLE001 - seeding is best-effort
+            self.bridge.events.warn(
+                "engine", "could not seed history",
+                f"{type(exc).__name__}: the bot will warm up from live bars, "
+                f"which takes far longer",
+            )
+            return None
+        finally:
+            await client.close()
+
+        if not rows:
+            return None
+        frame = pd.DataFrame(rows).set_index("timestamp").sort_index()
+        return frame[["open", "high", "low", "close", "volume"]]
 
     # -- publishing --------------------------------------------------------
 
@@ -257,3 +309,20 @@ def _timeframe(bar_seconds: int) -> str:
         if bar_seconds <= seconds:
             return name
     return "1d"
+
+
+def _alpaca_timeframe(bar_seconds: int) -> str:
+    """The same interval in Alpaca's vocabulary.
+
+    Alpaca spells timeframes ``1Min`` / ``1Hour`` / ``1Day`` rather than ccxt's
+    ``1m`` / ``1h`` / ``1d``. Passing the wrong dialect is not an error the API
+    reports as one -- it simply returns nothing, which looks like a venue with
+    no history.
+    """
+    for seconds, name in (
+        (60, "1Min"), (300, "5Min"), (900, "15Min"), (1800, "30Min"),
+        (3600, "1Hour"), (14400, "4Hour"), (86400, "1Day"),
+    ):
+        if bar_seconds <= seconds:
+            return name
+    return "1Day"

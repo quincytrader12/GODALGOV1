@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from godalgo.build_info import describe
+from godalgo.ui.alpaca_probes import ALPACA_UNIVERSE
 from godalgo.execution.mode import ModeController, ModeSwitchError
 from godalgo.execution.types import TradingMode
 from godalgo.ui.credentials import CredentialStore, ExchangeCredential
@@ -71,16 +72,46 @@ def _static_dir() -> Path:
 _STATIC = _static_dir()
 _LOOPBACK_ONLY = "the UI holds exchange credentials and has no authentication"
 
-DEFAULT_UNIVERSE: tuple[str, ...] = (
+DEFAULT_VENUE = "alpaca"
+"""Where the terminal points out of the box.
+
+Alpaca, and its paper account specifically, because it is the only venue here
+that answers the question this project kept failing to answer: *is this thing
+actually working?* Paper is Alpaca's own matching against real market data,
+reached with real keys over the real API -- one base URL away from live. So the
+whole pipeline can be proven end to end before any money exists anywhere.
+
+It also carries the whole universe rather than one asset class: thousands of US
+equities and ETFs alongside crypto, all through one account.
+"""
+
+DEFAULT_UNIVERSE: tuple[str, ...] = ALPACA_UNIVERSE
+"""What the terminal watches out of the box.
+
+Twelve rows: enough that the panel shows the bot surveying a market rather
+than staring at one symbol, and few enough that the whole set arrives in two
+batched requests. The scanner replaces it with the account's real universe.
+"""
+
+DEFAULT_SYMBOL = "BTC/USD"
+"""What the engine trades unless told otherwise.
+
+Crypto rather than an equity, and deliberately: it trades continuously and is
+exempt from the pattern-day-trader rule, so a freshly started terminal has
+something to do at any hour and on any account size. An equity default would
+show a bot that appears broken for most of every week.
+"""
+
+BINANCE_UNIVERSE: tuple[str, ...] = (
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
     "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "DOGE/USDT",
     "LTC/USDT", "ATOM/USDT",
 )
-"""What the terminal watches out of the box.
+"""Kept because Binance still works; it is simply no longer the default.
 
-Twelve liquid majors: enough that the panel shows the bot surveying a
-market rather than staring at one symbol, and few enough that the whole
-set arrives in a single batched request.
+Symbols are venue-specific -- ``BTC/USDT`` does not exist at Alpaca and
+``SPY`` does not exist at Binance -- so switching venue has to switch this
+too, or the watchlist asks for instruments that cannot be quoted.
 """
 
 
@@ -120,7 +151,7 @@ class UIBridge:
     second, for a set of symbols that changes almost never.
     """
 
-    exchange_id: str = "binance"
+    exchange_id: str = DEFAULT_VENUE
     """Default venue for market data, when no credential names one."""
 
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
@@ -157,7 +188,7 @@ class UIBridge:
     equity: float = 10_000.0
     peak_equity: float = 10_000.0
     mode: str = "dry_run"
-    symbol: str = "BTC/USDT"
+    symbol: str = DEFAULT_SYMBOL
     regime: str = "indeterminate"
     conviction: float = 0.0
     target_weight: float = 0.0
@@ -309,10 +340,10 @@ class UIBridge:
 
 def build_terminal(
     *,
-    symbol: str = "BTC/USDT",
+    symbol: str = DEFAULT_SYMBOL,
     equity: float = 10_000.0,
     bar_seconds: int = 60,
-    exchange_id: str = "binance",
+    exchange_id: str = DEFAULT_VENUE,
 ) -> UIBridge:
     """Assemble a terminal that can actually trade.
 
@@ -404,7 +435,18 @@ def _feed_exchange(bridge: UIBridge) -> str:
     )
     # Never hand an unusable id to the feed. A stored typo would otherwise
     # take market data down entirely rather than degrading to the default.
-    return candidate if known_exchange(candidate) else "binance"
+    return candidate if known_exchange(candidate) else DEFAULT_VENUE
+
+
+def universe_for(exchange_id: str) -> list[str]:
+    """The starting watchlist for a venue.
+
+    Symbols do not travel between venues: ``BTC/USDT`` does not exist at
+    Alpaca and ``SPY`` does not exist at Binance. Switching venue without
+    switching this asks for instruments that cannot be quoted, and the panel
+    fills with rows that never get a price -- which reads as a broken feed.
+    """
+    return list(DEFAULT_UNIVERSE if exchange_id == "alpaca" else BINANCE_UNIVERSE)
 
 
 def _watch_symbols(bridge: UIBridge) -> list[str]:
@@ -626,7 +668,7 @@ def create_app(bridge: UIBridge) -> FastAPI:
 
         body = payload or {}
         exchange_id = normalise_exchange_id(
-            str(body.get("exchange_id") or "binance")
+            str(body.get("exchange_id") or _feed_exchange(bridge))
         )
         symbol = str(body.get("symbol") or bridge.symbol).strip()
 

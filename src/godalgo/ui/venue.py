@@ -237,6 +237,16 @@ class VenueProbe:
         requested, exchange_id = exchange_id, normalise_exchange_id(exchange_id)
         results: list[ProbeResult] = []
 
+        if exchange_id == "alpaca":
+            # ccxt's Alpaca binding is crypto-only. Going through it here would
+            # quietly reduce a universe of thousands of instruments to a couple
+            # of dozen pairs, which is the opposite of why we are on this venue.
+            from godalgo.ui import alpaca_probes
+
+            return await alpaca_probes.check_public(
+                self.events, symbol, timeout=self.timeout
+            )
+
         if not known_exchange(exchange_id):
             hint = suggest_exchange_ids(requested)
             detail = (
@@ -275,6 +285,13 @@ class VenueProbe:
         proves the credential is good.
         """
         import ccxt.async_support as accxt
+
+        if normalise_exchange_id(credential.exchange_id) == "alpaca":
+            from godalgo.ui import alpaca_probes
+
+            return await alpaca_probes.check_credentials(
+                self.events, credential, timeout=self.timeout
+            )
 
         results = await self.check_public(credential.exchange_id, symbol)
         if not results[0].ok:

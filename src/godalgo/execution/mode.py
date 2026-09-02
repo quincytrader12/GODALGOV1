@@ -47,11 +47,24 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from godalgo.execution.broker import Broker, DryRunBroker, PaperBroker
 from godalgo.execution.types import TradingMode
 
 __all__ = ["ModeChange", "ModeController", "ModeSwitchError"]
+
+
+def _is_alpaca(credential: Any) -> bool:
+    """Whether this credential names Alpaca.
+
+    ccxt's Alpaca binding covers crypto only, so a credential for this venue
+    must not go down the ccxt path: it would work, and it would silently
+    reduce the tradable universe from thousands of instruments to a couple of
+    dozen crypto pairs.
+    """
+    return str(getattr(credential, "exchange_id", "")).strip().lower() == "alpaca"
+
 
 logger = logging.getLogger(__name__)
 
@@ -274,11 +287,42 @@ class ModeController:
 
     def _build(self, mode: TradingMode) -> Broker:
         if mode is TradingMode.LIVE:
+            credential = self._credential()
+            if _is_alpaca(credential):
+                return self._alpaca_broker(credential)
+
             from godalgo.execution.live import LiveBroker
 
             # LiveBroker re-checks the credential's trade permission itself.
             # Two independent checks on the one irreversible path is deliberate.
-            return LiveBroker(arm=True, credential=self._credential())
+            return LiveBroker(arm=True, credential=credential)
         if mode is TradingMode.PAPER:
             return PaperBroker(starting_equity=self.equity)
         return DryRunBroker(starting_equity=self.equity)
+
+    def _alpaca_broker(self, credential: Any) -> Broker:
+        """A broker pointed at the account the credential names.
+
+        The permission check is repeated here rather than trusted from the
+        caller, exactly as ``LiveBroker`` does: this is the one irreversible
+        path in the system and one check on it is not enough.
+
+        Note what LIVE means here. If the stored credential is marked as a
+        paper account, LIVE mode runs the full pipeline against Alpaca's own
+        matching engine with real market data and no real money. That is not a
+        weaker mode -- it is the strongest possible test short of funding, and
+        it is the whole reason for being on this venue.
+        """
+        from godalgo.venues.alpaca_broker import AlpacaBroker
+
+        if not getattr(credential, "trade_enabled", False):
+            from godalgo.execution.live import ArmingError
+
+            raise ArmingError(
+                "the Alpaca key is stored but not permitted to place orders — "
+                "tick 'allow this key to place orders' in Connections"
+            )
+
+        from godalgo.ui.alpaca_probes import client_for
+
+        return AlpacaBroker(client_for(credential))

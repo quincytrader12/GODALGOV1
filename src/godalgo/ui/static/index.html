@@ -26,6 +26,7 @@
       <span class="lamp" id="lamp-venue"  title="venue reachability"><i></i>VENUE</span>
       <span class="lamp" id="lamp-data"   title="live market data"><i></i>DATA</span>
       <span class="lamp" id="lamp-key"    title="exchange credentials"><i></i>KEY</span>
+      <span class="lamp" id="lamp-open"   title="trading session"><i></i>OPEN</span>
       <span class="lamp" id="lamp-tg"     title="telegram"><i></i>TG</span>
     </div>
     <div class="mode-switch" id="mode-switch">
@@ -179,13 +180,23 @@
           <pre class="diag" id="k-diag-out" hidden></pre>
 
           <div class="pair">
-            <input type="text" id="k-ex"    placeholder="exchange id" autocomplete="off" value="binance">
+            <select id="k-ex" title="which venue this key belongs to">
+              <option value="alpaca" selected>alpaca</option>
+              <option value="binance">binance</option>
+              <option value="binanceus">binance.us</option>
+              <option value="coinbase">coinbase</option>
+              <option value="kraken">kraken</option>
+            </select>
             <input type="text" id="k-label" placeholder="label" autocomplete="off">
           </div>
-          <input type="password" id="k-key"    placeholder="api key"    autocomplete="off">
-          <input type="password" id="k-secret" placeholder="api secret" autocomplete="off">
+          <input type="password" id="k-key"    placeholder="api key id"  autocomplete="off">
+          <input type="password" id="k-secret" placeholder="api secret"  autocomplete="off">
           <input type="password" id="k-pass"   placeholder="passphrase (optional)" autocomplete="off">
-          <label><input type="checkbox" id="k-testnet"> testnet / sandbox keys</label>
+          <label><input type="checkbox" id="k-testnet" checked> paper account (Alpaca) / testnet</label>
+          <p class="note" id="k-paper-note">Alpaca paper is a real account with
+             real market data and no real money, on separate keys from live.
+             Leave this ticked unless you pasted live keys — paper keys are
+             rejected by the live endpoint and the reverse.</p>
           <label><input type="checkbox" id="k-trade"> allow this key to place orders</label>
           <button id="k-add">Add &amp; test connection</button>
           <p class="note">Keys are stored at <code id="k-path">~/.godalgo/credentials.json</code>

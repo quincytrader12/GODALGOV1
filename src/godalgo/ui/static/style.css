@@ -441,11 +441,14 @@ html, body {
   .stat.opt2 { display: none; }
 }
 
-@media (max-width: 1380px) {
+/* Raised from 1380/1300 when the session lamp was added. 1366 is one of the
+   most common laptop widths there is, and it sat in the gap between two
+   breakpoints: the header overflowed, and this layout does not scroll, it
+   clips -- with the mode switch last in line, which is how the LIVE button
+   became unclickable once before. Measured at seven widths rather than
+   reasoned about; the first attempt at this fix still failed at 1366. */
+@media (max-width: 1420px) {
   .stat.opt3 { display: none; }
-}
-
-@media (max-width: 1300px) {
   .stat.opt4 { display: none; }
 }
 
@@ -775,3 +778,20 @@ html, body {
 .ipbar .v.pending { color: var(--text-dim); }
 .ipbar .v.failed  { color: var(--red); user-select: auto; }
 .ipbar button { flex: 0 0 auto; }
+
+/* A venue picker rather than a free-text field. The old input accepted any
+   string, and one capital letter in it took the terminal down for a round:
+   "Binance" is not a ccxt id, and nothing on screen connected the outage to
+   the typo. A list cannot be mistyped. */
+.form select {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  border-radius: 2px;
+}
+.form select:focus { outline: none; border-color: var(--cyan-dim); }

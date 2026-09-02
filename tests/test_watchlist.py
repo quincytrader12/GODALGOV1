@@ -61,7 +61,7 @@ class _Venue:
 
 
 def _run_tick(bridge, venue, symbols):
-    feed = MarketFeed(bridge, symbols=symbols)
+    feed = MarketFeed(bridge, exchange_id="binance", symbols=symbols)
     feed._exchange = venue
     asyncio.run(feed._tick())
     return feed
@@ -93,7 +93,8 @@ def test_a_venue_without_batching_still_works(bridge):
 def test_a_venue_that_advertises_batching_but_refuses_falls_back_once(bridge):
     """And remembers, so the failed call is not repaid every five seconds."""
     venue = _Venue(fail_batch=True)
-    feed = MarketFeed(bridge, symbols=["BTC/USDT", "ETH/USDT"])
+    feed = MarketFeed(bridge, exchange_id="binance",
+                      symbols=["BTC/USDT", "ETH/USDT"])
     feed._exchange = venue
 
     asyncio.run(feed._tick())
@@ -117,7 +118,8 @@ def test_a_venue_outage_does_not_raise_or_empty_the_list(bridge):
         async def fetch_tickers(self, symbols=None):
             raise ConnectionError("venue down")
 
-    feed = MarketFeed(bridge, symbols=["BTC/USDT", "ETH/USDT"])
+    feed = MarketFeed(bridge, exchange_id="binance",
+                      symbols=["BTC/USDT", "ETH/USDT"])
     feed._exchange = _Dead()
     asyncio.run(feed._tick())  # must not raise
 

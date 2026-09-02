@@ -67,8 +67,8 @@ class MarketFeed:
     """
 
     bridge: UIBridge
-    exchange_id: str = "binance"
-    symbols: list[str] = field(default_factory=lambda: ["BTC/USDT"])
+    exchange_id: str = "alpaca"
+    symbols: list[str] = field(default_factory=lambda: ["BTC/USD"])
     interval: float = 5.0
     _exchange: Any = field(default=None, init=False, repr=False)
     _consecutive_failures: int = field(default=0, init=False)
@@ -90,10 +90,17 @@ class MarketFeed:
             # aiohttp session must be closed or shutdown warns and leaks it.
             await self._close()
 
+    @property
+    def _is_alpaca(self) -> bool:
+        return self.exchange_id == "alpaca"
+
     async def _tick(self) -> None:
         try:
-            exchange = await self._client()
-            tickers = await self._fetch(exchange)
+            if self._is_alpaca:
+                tickers = await self._fetch_alpaca()
+            else:
+                exchange = await self._client()
+                tickers = await self._fetch(exchange)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - reported, never propagated
@@ -104,6 +111,26 @@ class MarketFeed:
             return
 
         self._on_success(tickers)
+
+    async def _fetch_alpaca(self) -> dict[str, dict[str, float]]:
+        """Snapshots for the whole watchlist, in one request per asset class.
+
+        Alpaca serves market data only to authenticated requests -- there is no
+        anonymous public feed as there is on a crypto exchange -- so the feed
+        needs the stored key. Without one it reports that plainly rather than
+        showing an empty panel that looks like an outage.
+        """
+        from godalgo.ui.alpaca_probes import client_for
+
+        if self._exchange is None:
+            credential = self.bridge.credentials.first_for("alpaca")
+            if credential is None:
+                raise RuntimeError(
+                    "Alpaca serves market data to authenticated requests only. "
+                    "Add an Alpaca key in Connections and prices will start."
+                )
+            self._exchange = client_for(credential)
+        return await self._exchange.snapshots(self.symbols)
 
     async def _client(self) -> Any:
         if self._exchange is None:
@@ -202,6 +229,13 @@ class MarketFeed:
     def _on_failure(self, exc: BaseException) -> None:
         from godalgo.ui.venue import classify_error, raw_error
 
+        if self._is_alpaca:
+            # A missing key is not an outage and must not be reported as one:
+            # the remedy is a form on screen, not a wait.
+            self._alpaca_failure(exc)
+            return
+
+
         self._consecutive_failures += 1
         self.bridge.connected = False
         kind, explanation = classify_error(exc)
@@ -230,10 +264,62 @@ class MarketFeed:
 
         # Force a fresh client next tick: a poisoned aiohttp session survives
         # the outage and keeps failing after the venue recovers.
+        self._drop_client()
+
+    def _alpaca_failure(self, exc: BaseException) -> None:
+        """Report an Alpaca failure in terms of what to do about it."""
+        from godalgo.venues.alpaca import AlpacaError
+
+        self._consecutive_failures += 1
+        self.bridge.connected = False
+
+        if isinstance(exc, RuntimeError) and "authenticated" in str(exc):
+            kind, explanation = "needs_key", str(exc)
+        elif isinstance(exc, AlpacaError) and exc.is_auth:
+            kind, explanation = "auth_failed", (
+                "Alpaca rejected the key for market data. Check the paper tick "
+                "matches the keys: paper and live keys are separate."
+            )
+        elif isinstance(exc, AlpacaError) and exc.status == 429:
+            kind, explanation = "rate_limited", (
+                "Rate limited by Alpaca; it clears on its own."
+            )
+        else:
+            kind, explanation = "unreachable", (
+                "Could not reach Alpaca market data. Run Diagnose connection "
+                "to find which layer is failing."
+            )
+
+        self.bridge.venue_status["market_data"] = {
+            "name": "market_data", "ok": False, "detail": explanation,
+            "kind": kind, "raw": f"{type(exc).__name__}: {exc}"[:300],
+        }
+        if kind == "unreachable":
+            self.bridge.venue_status["reachable"] = {
+                "name": "reachable", "ok": False,
+                "detail": explanation, "kind": kind,
+            }
+
+        if self._consecutive_failures == 1 or self._consecutive_failures % 12 == 0:
+            self.bridge.events.warn(
+                "data", f"market data unavailable ({self._consecutive_failures}x)",
+                explanation,
+            )
+
+        # A missing key is not fixed by rebuilding the client, and rebuilding
+        # every five seconds would churn connections for nothing.
+        if kind != "needs_key":
+            self._drop_client()
+
+    def _drop_client(self) -> None:
         exchange, self._exchange = self._exchange, None
-        if exchange is not None:
-            with contextlib.suppress(Exception):
-                asyncio.get_running_loop().create_task(exchange.close())
+        if exchange is None:
+            return
+        closer = getattr(exchange, "close", None)
+        if closer is None:
+            return
+        with contextlib.suppress(Exception):
+            asyncio.get_running_loop().create_task(closer())
 
     async def _close(self) -> None:
         if self._exchange is not None:

@@ -1377,7 +1377,7 @@ $('k-check').addEventListener('click', async () => {
     const r = await fetch('/api/venue/check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'binance' }),
+      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'alpaca' }),
     });
     const d = await r.json();
 
@@ -1387,7 +1387,7 @@ $('k-check').addEventListener('click', async () => {
     const w = await (await fetch('/api/watchlist/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'binance' }),
+      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'alpaca' }),
     })).json();
 
     const lines = summariseChecks(d.checks || []);
@@ -1409,7 +1409,7 @@ $('k-diag').addEventListener('click', async () => {
     const r = await fetch('/api/diagnostics', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'binance' }),
+      body: JSON.stringify({ exchange_id: $('k-ex').value.trim() || 'alpaca' }),
     });
     const d = await r.json();
     // Built as nodes, not innerHTML: the raw error text is exchange output
@@ -1564,6 +1564,25 @@ function renderLamps(snap) {
       : (data.detail || '');
   }
   setLamp('lamp-data', dataState, dataTitle);
+
+  // Whether the venue will accept an order at all. On equities the market is
+  // shut most of the week, and a bot that looks idle because it is 2am is
+  // indistinguishable from one that is broken -- which is the single most
+  // expensive ambiguity this terminal exists to remove. Crypto never closes,
+  // so this stays green on a crypto-only watchlist.
+  const clock = (reachable && reachable.data) || {};
+  let openState = 'off';
+  let openTitle = 'session state unknown — test the venue connection';
+  if (clock.market_open === true) {
+    openState = 'ok';
+    openTitle = 'market open' + (clock.next_close ? ` — closes ${clock.next_close}` : '');
+  } else if (clock.market_open === false) {
+    // Amber, not red. A closed market is normal, not a fault.
+    openState = 'warn';
+    openTitle = 'market closed' + (clock.next_open ? ` — opens ${clock.next_open}` : '')
+      + '. Crypto still trades.';
+  }
+  setLamp('lamp-open', openState, openTitle);
 
   // Four states, not two. "Never tested" and "tested and failed" are
   // different facts, and a grey lamp that means both tells the operator
