@@ -176,6 +176,13 @@ class UIBridge:
     mode switch mean anything at all.
     """
 
+    portfolio: dict[str, Any] | None = None
+    """Supervisor state: which symbols are active, and the last scan.
+
+    The answer to "what is the bot looking at" once it is looking at more than
+    one thing.
+    """
+
     book: Any = None
     """The allocator's current view. Assigned by build_terminal.
 
@@ -333,6 +340,7 @@ class UIBridge:
             target_weight=self.target_weight,
             current_weight=self.current_weight,
             book=self.book.to_dict() if self.book is not None else None,
+            portfolio=self.portfolio,
             last_price=self.last_price,
             watchlist=self.watchlist_rows(),
             has_keys=len(self.credentials) > 0,
@@ -371,18 +379,19 @@ def build_terminal(
 
     * a ``ModeController`` that reads the credential store, so a key ticked
       in the interface is the key live uses;
-    * a ``TradingSession`` the mode switch starts, stops and re-brokers;
+    * a ``PortfolioSession`` the mode switch starts, stops and re-brokers,
+      running a scanned universe rather than a single instrument;
     * a flatten hook, so no switch can strand an open position.
     """
-    from godalgo.ui.session import TradingSession
+    from godalgo.ui.portfolio_session import PortfolioSession
 
     bridge = UIBridge(
         starting_equity=equity, equity=equity, exchange_id=exchange_id,
     )
     bridge.symbol = symbol
 
-    session = TradingSession(
-        bridge, symbol=symbol, bar_seconds=bar_seconds, exchange_id=exchange_id,
+    session = PortfolioSession(
+        bridge, exchange_id=exchange_id, bar_seconds=bar_seconds,
     )
     bridge.session = session
 

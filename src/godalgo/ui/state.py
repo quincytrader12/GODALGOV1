@@ -450,6 +450,9 @@ class UISnapshot:
     """Most recent activity. Carried in the snapshot rather than polled
     separately so the log cannot drift out of step with what it describes."""
 
+    portfolio: dict[str, Any] | None = None
+    """Which symbols the bot is trading, and what the last scan chose."""
+
     book: dict[str, Any] | None = None
     """The allocation, reduced to its headline numbers.
 
@@ -483,6 +486,7 @@ class UISnapshot:
                 "total_count": self.total_count,
             },
             "book": _book_headline(self.book),
+            "portfolio": self.portfolio,
             "brain": {
                 "mode": self.mode,
                 "symbol": self.symbol,

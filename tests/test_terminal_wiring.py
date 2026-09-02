@@ -285,9 +285,15 @@ def test_warming_up_is_distinguished_from_running(terminal):
     _, bridge = terminal
     assert bridge.session.warmed_up is False
 
-    bridge.session._engine = SimpleNamespace(
+    # A book is warmed up when ANY engine can signal: waiting for the slowest
+    # would report a working bot as blind.
+    bridge.session.supervisor = SimpleNamespace(engines={
+        "COLD": SimpleNamespace(bars=SimpleNamespace(n_complete=3), _warmup=250),
+    })
+    assert bridge.session.warmed_up is False
+
+    bridge.session.supervisor.engines["HOT"] = SimpleNamespace(
         bars=SimpleNamespace(n_complete=5000), _warmup=250,
-        state=SimpleNamespace(snapshot=dict),
     )
     assert bridge.session.warmed_up is True
 

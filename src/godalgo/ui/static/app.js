@@ -1585,11 +1585,41 @@ function renderLamps(snap) {
   setLamp('lamp-open', openState, openTitle);
 }
 
+/* Which symbols the supervisor is actually trading, and what the last scan
+ * made of the rest. "Nothing selected" is a decision the scanner made, not a
+ * fault, so it is worded as one -- refusing most of what it sees is the
+ * expected outcome. */
+function renderPortfolio(snap) {
+  const el = $('k-active');
+  if (!el) return;
+  const p = snap.portfolio;
+  if (!p) {
+    el.textContent = '—';
+    el.title = 'no session running';
+    return;
+  }
+  const active = p.active || [];
+  if (active.length) {
+    el.textContent = active.join(' ');
+    el.className = '';
+    el.title = `${active.length} of ${(p.selected || []).length} selected by `
+      + `the last scan; rotations: ${p.rotations || 0}`;
+    return;
+  }
+  el.textContent = p.last_scan_at ? 'nothing selected' : 'scanning…';
+  el.className = 'amber';
+  el.title = p.last_scan_at
+    ? 'the scan ran and nothing cleared the filters — refusing is the '
+      + 'expected outcome, not a fault'
+    : 'the first scan has not finished yet';
+}
+
 /* The two numbers that decide whether a book is what it looks like: how many
  * independent bets it really holds, and how much of it is a decision to sit in
  * cash. Effective breadth sits beside the position count on purpose -- the
  * count is the number that looks like diversification. */
 function renderBook(snap) {
+  renderPortfolio(snap);
   const book = snap.book;
   const breadth = $('k-breadth');
   if (!book || book.state !== 'ready') {
