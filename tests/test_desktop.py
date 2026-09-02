@@ -367,7 +367,52 @@ def test_an_unexpected_failure_names_the_log(monkeypatch, tmp_path):
     assert "terminal.log" in said[0][1]
 
 
-def test_message_falls_back_to_stderr_off_windows(capsys):
+def test_message_falls_back_to_stderr_off_windows(capsys, monkeypatch):
+    """Note the monkeypatch: without it this test opened a real message box.
+
+    On a Windows CI runner that dialog has nobody to click it, so MessageBoxW
+    never returns and the job hangs with no failing test to point at. That is
+    what the per-test timeout in CI now catches.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    desktop._message("title", "body")
+    assert "body" in capsys.readouterr().err
+
+
+def test_message_uses_a_dialog_on_windows(monkeypatch):
+    """The dialog is the point: a windowed process has no console to print to."""
+    import ctypes
+    import types as _types
+
+    shown: list[tuple] = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        ctypes, "windll",
+        _types.SimpleNamespace(
+            user32=_types.SimpleNamespace(
+                MessageBoxW=lambda *a: shown.append(a) or 1
+            ),
+        ),
+        raising=False,
+    )
+    desktop._message("title", "body")
+    assert shown and shown[0][1] == "body"
+
+
+def test_a_broken_dialog_falls_back_instead_of_raising(monkeypatch, capsys):
+    """A failure to report a failure must not become the failure."""
+    import ctypes
+    import types as _types
+
+    def _boom(*_):
+        raise OSError("no window station")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        ctypes, "windll",
+        _types.SimpleNamespace(user32=_types.SimpleNamespace(MessageBoxW=_boom)),
+        raising=False,
+    )
     desktop._message("title", "body")
     assert "body" in capsys.readouterr().err
 

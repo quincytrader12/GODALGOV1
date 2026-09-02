@@ -39,6 +39,10 @@ dependencies = [
 [dependency-groups]
 dev = [
   "pytest>=8",
+  # A test that hangs must fail with a name rather than run out the job's
+  # clock. One did: a message box opened on a CI runner with nobody to click
+  # it, and the build sat in "Run tests" for ten minutes saying nothing.
+  "pytest-timeout>=2.3",
   "ruff>=0.9",
 ]
 

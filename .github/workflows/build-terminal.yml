@@ -65,7 +65,10 @@ jobs:
 
       - name: Run tests
         # Shipping a binary built from a red tree is worse than shipping none.
-        run: uv run pytest tests/ -q
+        # --timeout so a hung test is a named failure in two minutes rather
+        # than a job that sits silent until the runner is reclaimed. The
+        # slowest real test here is well under a second.
+        run: uv run pytest tests/ -q --timeout=120 --timeout-method=thread
 
       - name: Build executable
         run: uv run python build-exe.py

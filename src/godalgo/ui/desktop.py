@@ -65,12 +65,18 @@ def data_dir() -> Path:
 
 
 def available() -> bool:
-    """Whether a native window can be opened here."""
+    """Whether a native window can be opened here.
+
+    Asks the import system rather than importing: this runs on every launch
+    and on a build check, and neither needs pywebview's module-level work
+    done, let alone its GUI backend loaded.
+    """
+    import importlib.util
+
     try:
-        import webview  # noqa: F401
-    except ImportError:
+        return importlib.util.find_spec("webview") is not None
+    except (ImportError, ValueError):
         return False
-    return True
 
 
 def free_port() -> int:
