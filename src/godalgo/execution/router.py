@@ -37,10 +37,38 @@ __all__ = ["OrderRouter", "RoutingConfig", "RoutingDecision"]
 
 logger = logging.getLogger(__name__)
 
+DUPLICATE_WINDOW_SECONDS = 15.0
+"""Suggested window for a manual ticket path. See ``duplicate_window_seconds``.
+
+Long enough to cover a slow submit path and a frustrated second click, short
+enough not to block a genuine follow-up. Fifteen seconds is a judgement; the
+measurement behind it is a 3.5s silent path producing three real buys from one
+intended purchase.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class RoutingConfig:
     """Economic and mechanical constraints on order generation."""
+
+    duplicate_window_seconds: float = 0.0
+    """Refuse an identical ticket arriving within this many seconds. 0 is off.
+
+    Off for the engine, and that is the correct default rather than a timid
+    one. The failure this guards against is a human sending the same order
+    twice because the first one produced no visible response -- a 3.5s silent
+    submit path has been observed turning one intended purchase into three
+    real buys. The engine is not that: it re-decides once per bar and, on a
+    bar shorter than the window, a repeat is a legitimate attempt to reach a
+    target it has not reached yet. Blocking that would stop the bot trading.
+
+    Set it to ~15s on any path where a person can submit a ticket. There is no
+    such path today -- the UI starts and stops sessions and never places an
+    order -- so the mechanism exists, is tested, and is not armed against a
+    caller it would be wrong for. A client-side guard would not do: it is
+    bypassed by a reload, a second tab, or a dropped disabled state, and by
+    then the money has moved.
+    """
 
     min_edge_multiple: float = 1.5
     """Required ratio of expected edge to round-trip cost.
@@ -146,6 +174,12 @@ class OrderRouter:
     """Venue rules for the traded symbol. Load from the exchange before going live."""
     _submission_times: list[float] = field(default_factory=list, init=False)
     _in_flight: dict[str, str] = field(default_factory=dict, init=False)
+    _accepted: dict[tuple[str, float], float] = field(
+        default_factory=dict, init=False, repr=False,
+    )
+    """Recently accepted tickets, for the duplicate guard. Server-side on
+    purpose: a client-side guard is bypassed by a reload, a second tab, or a
+    dropped disabled state -- and by then the money has moved."""
 
     def round_trip_cost_bps(self, book: BookSnapshot, *, is_maker: bool) -> float:
         """Modelled cost of entering and exiting, in basis points.
@@ -215,6 +249,15 @@ class OrderRouter:
             # One order per symbol at a time. Stacking orders against the same
             # target is how a single signal becomes a double position.
             return refuse(f"order {self._in_flight[symbol]} already in flight")
+
+        recent = self._recent_ticket(symbol, target_weight)
+        if recent is not None:
+            # Worded as "already placed" rather than as a rejection, because a
+            # rejection reads as "nothing happened" and invites another click.
+            return refuse(
+                f"already placed {recent:.1f}s ago — check the blotter before "
+                f"sending it again"
+            )
 
         if not self._throttle_allows():
             return refuse("submission throttle reached")
@@ -301,6 +344,42 @@ class OrderRouter:
         """Record a submission for throttling and in-flight tracking."""
         self._submission_times.append(time.monotonic())
         self._in_flight[order.symbol] = order.client_order_id
+        self._accepted[(order.symbol, round(order.signed_amount, 9))] = time.monotonic()
+
+    def _recent_ticket(self, symbol: str, target_weight: float) -> float | None:
+        """Seconds since an identical ticket was accepted, if recently.
+
+        Keyed on symbol and direction rather than on an exact quantity: a
+        repeated click produces the same intent, and a size differing in the
+        ninth decimal is the same order for this purpose.
+
+        Off unless a window is configured -- see ``duplicate_window_seconds``.
+        """
+        window = self.config.duplicate_window_seconds
+        if window <= 0:
+            return None
+
+        now = time.monotonic()
+        direction = 1.0 if target_weight >= 0 else -1.0
+        for (sym, amount), at in list(self._accepted.items()):
+            if now - at > window:
+                del self._accepted[(sym, amount)]
+                continue
+            if sym == symbol and (1.0 if amount >= 0 else -1.0) == direction:
+                return now - at
+        return None
+
+    def forget_recent(self) -> int:
+        """Drop the duplicate memory. Called when the book is flattened.
+
+        An identical ticket into an emptied book is a deliberate re-entry, not
+        a double-click, and refusing it would leave the operator unable to get
+        back in after a kill switch -- the moment they are most likely to want
+        to.
+        """
+        count = len(self._accepted)
+        self._accepted.clear()
+        return count
 
     def mark_settled(self, symbol: str) -> None:
         """Clear the in-flight marker once an order reaches a terminal state.

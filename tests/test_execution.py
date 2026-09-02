@@ -409,3 +409,69 @@ def test_live_broker_refuses_a_read_only_stored_credential(monkeypatch):
     )
     with pytest.raises(ArmingError, match="stored for reading only"):
         LiveBroker(arm=True, credential=read_only)
+
+
+# --------------------------------------------------------------------------
+# the duplicate-ticket guard
+# --------------------------------------------------------------------------
+
+def test_the_duplicate_guard_is_off_for_the_engine():
+    """The engine re-decides once per bar and a repeat is a legitimate attempt
+    to reach a target it has not reached. Arming this against the engine would
+    stop the bot trading."""
+    from godalgo.execution.router import RoutingConfig
+
+    assert RoutingConfig().duplicate_window_seconds == 0.0
+
+
+def test_an_identical_ticket_inside_the_window_is_refused():
+    """The failure it guards: a slow, silent submit path turning one intended
+    purchase into three real buys."""
+    from godalgo.execution.router import OrderRouter, RoutingConfig
+
+    router = OrderRouter(config=RoutingConfig(duplicate_window_seconds=15.0))
+    first = router.decide("BTC/USDT", 0.6, 0.0, 100_000.0, book(),
+                          expected_edge_bps=50.0)
+    assert first.should_trade
+    router.mark_submitted(first.order)
+    router.mark_settled("BTC/USDT")
+
+    again = router.decide("BTC/USDT", 0.6, 0.0, 100_000.0, book(),
+                          expected_edge_bps=50.0)
+    assert not again.should_trade
+    # Not "rejected": a rejection reads as "nothing happened" and invites a
+    # fourth click, which is how the money moved in the first place.
+    assert "already placed" in again.reason
+    assert "blotter" in again.reason
+
+
+def test_a_different_direction_is_not_a_duplicate():
+    from godalgo.execution.router import OrderRouter, RoutingConfig
+
+    router = OrderRouter(config=RoutingConfig(duplicate_window_seconds=15.0))
+    first = router.decide("BTC/USDT", 0.6, 0.0, 100_000.0, book(),
+                          expected_edge_bps=50.0)
+    router.mark_submitted(first.order)
+    router.mark_settled("BTC/USDT")
+
+    other = router.decide("BTC/USDT", -0.6, 0.0, 100_000.0, book(),
+                          expected_edge_bps=50.0)
+    assert other.should_trade
+
+
+def test_flattening_clears_the_duplicate_memory():
+    """An identical ticket into an emptied book is a deliberate re-entry, not
+    a double-click -- and refusing it would leave the operator unable to get
+    back in right after a kill switch, which is when they most want to."""
+    from godalgo.execution.router import OrderRouter, RoutingConfig
+
+    router = OrderRouter(config=RoutingConfig(duplicate_window_seconds=15.0))
+    first = router.decide("BTC/USDT", 0.6, 0.0, 100_000.0, book(),
+                          expected_edge_bps=50.0)
+    router.mark_submitted(first.order)
+    router.mark_settled("BTC/USDT")
+
+    assert router.forget_recent() == 1
+    again = router.decide("BTC/USDT", 0.6, 0.0, 100_000.0, book(),
+                          expected_edge_bps=50.0)
+    assert again.should_trade
