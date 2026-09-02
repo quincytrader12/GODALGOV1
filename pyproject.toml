@@ -25,6 +25,15 @@ dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
   "httpx>=0.27",
+
+  # The terminal as a native window rather than a browser tab. It renders the
+  # same page through the WebView2 runtime that ships with Edge, so nothing is
+  # downloaded and no second browser engine is bundled.
+  #
+  # Windows only, deliberately: that is where the operator runs, and on Linux
+  # pywebview needs GTK or Qt present at runtime, which a portable build cannot
+  # assume. Everywhere else the terminal falls back to a browser tab.
+  "pywebview>=5.3; sys_platform == 'win32'",
 ]
 
 [dependency-groups]

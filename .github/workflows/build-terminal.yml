@@ -96,6 +96,16 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the window component survived packaging
+        # Windows-only, and worth its own step: pywebview resolves its backend
+        # by name and pythonnet loads the WebView2 wrapper through the CLR, so
+        # a build that dropped either still succeeds and still serves the UI --
+        # it just falls back to a browser tab on the operator's machine, which
+        # is the failure this whole mode exists to end. Importing is all that
+        # is checked; a runner has no desktop to open a window on.
+        if: matrix.os == 'windows-latest'
+        run: ./${{ matrix.binary }} --check-window
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -150,12 +160,19 @@ jobs:
             launch.
 
             ```
+            godalgo-terminal.exe           # a window, attached to a real session
             godalgo-terminal.exe --demo    # fabricated data, nothing traded
-            godalgo-terminal.exe           # attached to a real session
+            godalgo-terminal.exe --browser # a browser tab on port 8787
             ```
 
-            Opens at http://127.0.0.1:8787 — loopback only, because the process
-            holds exchange credentials and has no authentication.
+            On Windows it opens in its own window, rendered by the WebView2
+            runtime already installed with Edge, on a port the OS picks — so
+            there is no port to collide with and no tab to lose. Closing the
+            window stops the bot, and it asks first if live positions are open.
+
+            macOS and Linux serve the same UI to a browser tab at
+            http://127.0.0.1:8787. Either way it is loopback only, because the
+            process holds exchange credentials and has no authentication.
 
             **macOS and Linux:** `chmod +x` the file first. macOS will also need
             `xattr -d com.apple.quarantine <file>` since the build is unsigned.

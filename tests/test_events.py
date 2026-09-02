@@ -45,7 +45,10 @@ def test_since_returns_only_what_the_client_has_not_seen():
 
 def test_sequence_numbers_are_monotonic_across_levels():
     events = EventLog()
-    events.info("a", "1"); events.warn("b", "2"); events.error("c", "3"); events.good("d", "4")
+    events.info("a", "1")
+    events.warn("b", "2")
+    events.error("c", "3")
+    events.good("d", "4")
     sequences = [e["sequence"] for e in reversed(events.entries())]
     assert sequences == sorted(sequences)
     assert len(set(sequences)) == 4
@@ -65,7 +68,10 @@ def test_a_verbose_detail_is_truncated_rather_than_dropped():
 
 def test_counts_are_reported_per_level():
     events = EventLog()
-    events.info("a", "i"); events.warn("a", "w"); events.warn("a", "w2"); events.error("a", "e")
+    events.info("a", "i")
+    events.warn("a", "w")
+    events.warn("a", "w2")
+    events.error("a", "e")
     assert events.counts() == {"info": 1, "good": 0, "warn": 2, "error": 1}
 
 

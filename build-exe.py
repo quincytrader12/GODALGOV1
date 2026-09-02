@@ -62,6 +62,16 @@ HIDDEN = [
     "godalgo.service",
 ]
 
+# The native window, Windows only. pywebview picks its backend by name at
+# runtime and pythonnet loads the WebView2 wrapper through the CLR, so none of
+# it is visible to static analysis: without these the binary builds cleanly and
+# then reports "window component: missing" on the target machine.
+#
+# --collect-all rather than --hidden-import because these three ship files the
+# import graph does not mention -- pywebview's injected JavaScript, and the
+# native DLLs clr_loader and pythonnet load to start the runtime.
+COLLECT_WINDOWS = ["webview", "clr_loader", "pythonnet"]
+
 # Excluded to keep the bundle from carrying things it never uses. Every module
 # left in is a file the loader may touch and, on Windows, one more file for
 # Defender to inspect.
@@ -134,6 +144,10 @@ def main() -> int:
     ]
     for name in HIDDEN:
         command += ["--hidden-import", name]
+    if sys.platform == "win32":
+        command += ["--hidden-import", "webview.platforms.edgechromium"]
+        for name in COLLECT_WINDOWS:
+            command += ["--collect-all", name]
     for name in EXCLUDE:
         command += ["--exclude-module", name]
     command.append(str(ROOT / "run-terminal.py"))
@@ -165,6 +179,8 @@ def main() -> int:
     print("run it with:")
     print(f"  {binary} --demo        # fabricated positions, nothing traded")
     print(f"  {binary}               # attached to a real session")
+    if sys.platform == "win32":
+        print("  it opens a window; --browser gives the old browser tab")
     return 0
 
 
