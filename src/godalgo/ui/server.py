@@ -176,6 +176,17 @@ class UIBridge:
     mode switch mean anything at all.
     """
 
+    book: Any = None
+    """The allocator's current view. Assigned by build_terminal.
+
+    Optional so the UI still runs as a pure viewer in demo mode, where there
+    is no equity to allocate and no record to size against.
+    """
+
+    forward: Any = None
+    """The persisted forward record. Its value is months of accumulation, so
+    it is loaded from disk at startup rather than started empty."""
+
     mode_controller: ModeController | None = None
     """Owns the broker and performs guarded mode switches.
 
@@ -321,6 +332,7 @@ class UIBridge:
             conviction=self.conviction,
             target_weight=self.target_weight,
             current_weight=self.current_weight,
+            book=self.book.to_dict() if self.book is not None else None,
             last_price=self.last_price,
             watchlist=self.watchlist_rows(),
             has_keys=len(self.credentials) > 0,
@@ -393,6 +405,20 @@ def build_terminal(
     )
     bridge.mode_controller = controller
     bridge.mode = controller.mode.value
+
+    # The allocator and the record it sizes against. Attached here, in the one
+    # constructor every entry point calls, because the last thing built in
+    # isolation and wired nowhere was the mode switch.
+    from godalgo.research.forward import ForwardRecord
+    from godalgo.ui.book_state import BookManager
+    from godalgo.ui.feed import MarketFeed
+
+    bridge.forward = ForwardRecord(bridge.credentials.directory / "forward.jsonl")
+    bridge.book = BookManager(forward=bridge.forward)
+    # The poll cadence the allocator annualises against must be the one
+    # the feed actually uses, or every volatility is wrong by its ratio.
+    bridge.book.interval_seconds = MarketFeed.interval
+    session.book = bridge.book
     return bridge
 
 
@@ -730,6 +756,34 @@ def create_app(bridge: UIBridge) -> FastAPI:
             "kind": status.get("kind", ""),
             "rows": len(bridge.watchlist),
         })
+
+    @app.get("/api/book")
+    async def book() -> JSONResponse:
+        """The current allocation, with the binding constraint on every line.
+
+        Separate from the snapshot for the detail the snapshot deliberately
+        omits: this can be read on demand without paying for it once a second.
+        """
+        if bridge.book is None:
+            return JSONResponse({
+                "state": "unavailable",
+                "detail": "no allocator attached — this terminal is a viewer",
+            })
+        return JSONResponse(bridge.book.to_dict())
+
+    @app.get("/api/forward")
+    async def forward(strategy: str | None = None) -> JSONResponse:
+        """The forward record: the only unbiased evidence here.
+
+        Out-of-sample first, yield as a footnote, and every Sharpe carrying the
+        interval that says whether it means anything.
+        """
+        if bridge.forward is None:
+            return JSONResponse({
+                "state": "unavailable",
+                "detail": "no forward record attached",
+            })
+        return JSONResponse(bridge.forward.summary(strategy))
 
     @app.get("/api/ip")
     async def public_address(refresh: bool = False) -> JSONResponse:

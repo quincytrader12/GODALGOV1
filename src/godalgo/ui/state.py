@@ -450,6 +450,14 @@ class UISnapshot:
     """Most recent activity. Carried in the snapshot rather than polled
     separately so the log cannot drift out of step with what it describes."""
 
+    book: dict[str, Any] | None = None
+    """The allocation, reduced to its headline numbers.
+
+    Effective breadth travels beside the position count deliberately: the
+    position count is the number that looks like diversification and this is
+    the one that is.
+    """
+
     def to_dict(self) -> dict[str, Any]:
         pf = self.profit_factor
         return {
@@ -474,6 +482,7 @@ class UISnapshot:
                 "rendered_count": self.rendered_count,
                 "total_count": self.total_count,
             },
+            "book": _book_headline(self.book),
             "brain": {
                 "mode": self.mode,
                 "symbol": self.symbol,
@@ -489,3 +498,29 @@ class UISnapshot:
             "venue": self.venue,
             "events": self.events,
         }
+
+
+def _book_headline(book: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The allocation reduced to what the header renders.
+
+    The full book carries a line and an explanation per position; sending all
+    of it once a second would be a frame far larger than the panel needs. The
+    detail is one request away at /api/book.
+    """
+    if not book:
+        return None
+    if book.get("state") != "ready":
+        return {"state": book.get("state"), "detail": book.get("detail", "")}
+
+    forward = book.get("forward") or {}
+    return {
+        "state": "ready",
+        "positions": book.get("positions", 0),
+        "effective_breadth": round(float(book.get("effective_breadth", 0.0)), 2),
+        "gross": round(float(book.get("gross", 0.0)), 4),
+        "cash_weight": round(float(book.get("cash_weight", 0.0)), 4),
+        "drawdown_scalar": round(float(book.get("drawdown_scalar", 1.0)), 3),
+        "stressed_loss": round(float(book.get("stressed_loss", 0.0)), 4),
+        "forward_days": forward.get("days", 0),
+        "forward_summary": (forward.get("sharpe") or {}).get("summary", ""),
+    }

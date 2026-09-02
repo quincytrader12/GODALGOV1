@@ -1583,6 +1583,46 @@ function renderLamps(snap) {
       + '. Crypto still trades.';
   }
   setLamp('lamp-open', openState, openTitle);
+}
+
+/* The two numbers that decide whether a book is what it looks like: how many
+ * independent bets it really holds, and how much of it is a decision to sit in
+ * cash. Effective breadth sits beside the position count on purpose -- the
+ * count is the number that looks like diversification. */
+function renderBook(snap) {
+  const book = snap.book;
+  const breadth = $('k-breadth');
+  if (!book || book.state !== 'ready') {
+    // "not yet" and "nothing qualified" are different facts.
+    const detail = book ? (book.detail || 'not computed yet') : 'no allocator';
+    breadth.textContent = '—';
+    breadth.title = detail;
+    $('k-gross').textContent = '—';
+    $('k-stress').textContent = '—';
+    $('k-forward').textContent = '—';
+    $('k-forward').title = detail;
+    return;
+  }
+
+  breadth.textContent = `${book.effective_breadth.toFixed(1)} of ${book.positions}`;
+  breadth.className = (book.positions >= 10 && book.effective_breadth < 3)
+    ? 'red' : '';
+  breadth.title = book.effective_breadth < book.positions * 0.5
+    ? 'fewer independent bets than positions — correlated names count once'
+    : 'independent bets against position count';
+
+  $('k-gross').textContent = `${pct(book.gross, 0)} / ${pct(book.cash_weight, 0)}`;
+  $('k-gross').title = book.drawdown_scalar < 1
+    ? `gross cut to ${pct(book.drawdown_scalar, 0)} by the drawdown ladder`
+    : 'gross exposure and cash';
+
+  $('k-stress').textContent = pct(book.stressed_loss, 1);
+  $('k-stress').title = 'portfolio volatility if every correlation goes to 0.8';
+
+  $('k-forward').textContent = book.forward_days
+    ? `${book.forward_days}d` : 'none yet';
+  $('k-forward').title = book.forward_summary
+    || 'no forward record yet — allocation is held at the entry fraction';
 
   // Four states, not two. "Never tested" and "tested and failed" are
   // different facts, and a grey lamp that means both tells the operator
@@ -1661,6 +1701,7 @@ function apply(snap) {
   renderBrain(snap.brain, snap.health);
   renderEvents(snap.events);
   renderLamps(snap);
+  renderBook(snap);
   renderBuild(snap);
   renderWatchlist(snap.watchlist, snap.venue);
 

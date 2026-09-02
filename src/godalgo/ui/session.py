@@ -63,6 +63,13 @@ class TradingSession:
     """
 
     bridge: UIBridge
+    book: Any = None
+    """The allocator. When present it caps what the engine may hold; when
+    absent the engine is unconstrained, which is the demo-mode case."""
+
+    _last_cap_reason: str = field(default="", init=False, repr=False)
+    """So a standing cap is logged once rather than every second."""
+
     symbol: str = "BTC/USDT"
     bar_seconds: int = 60
     exchange_id: str = "binance"
@@ -279,7 +286,42 @@ class TradingSession:
                 # them.
                 for symbol, price in self.bridge.prices.items():
                     self.bridge.tracker.mark(symbol, price)
+
+                self._apply_book(state)
             await asyncio.sleep(1.0)
+
+    def _apply_book(self, state: Any) -> None:
+        """Rebuild the allocation and cap what the engine may hold.
+
+        The cap only ever reduces. An allocator that could enlarge a position
+        the strategy did not ask for would be taking a view of its own, which
+        is not what a sizing layer is for.
+        """
+        if self.book is None:
+            return
+        try:
+            self.book.observe(self.bridge.prices)
+            self.book.rebuild(
+                list(self.bridge.watchlist) or [self.symbol],
+                equity=self.bridge.equity,
+                peak_equity=self.bridge.peak_equity,
+                current={self.symbol: state.current_weight},
+            )
+            permitted, why = self.book.permitted_weight(
+                self.symbol, state.target_weight
+            )
+        except Exception:  # noqa: BLE001 - sizing must not kill the loop
+            logger.exception("could not apply the book")
+            return
+
+        if abs(permitted) < abs(state.target_weight) - 1e-9:
+            self.bridge.target_weight = permitted
+            engine = self._engine
+            if engine is not None and hasattr(engine, "set_weight_cap"):
+                engine.set_weight_cap(abs(permitted))
+            if why != self._last_cap_reason:
+                self._last_cap_reason = why
+                self.bridge.events.info("book", "position capped by the book", why)
 
 
 def _mode_of(broker: Any) -> TradingMode:
