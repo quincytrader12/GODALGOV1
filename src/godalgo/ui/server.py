@@ -20,6 +20,7 @@ import ipaddress
 import json
 import logging
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -931,6 +932,39 @@ def port_owner(host: str, port: int, timeout: float = 1.5) -> str:
     return "godalgo" if b'"health"' in body and b'"pnl"' in body else "other"
 
 
+def wait_until_serving(host: str, port: int, timeout: float = 90.0) -> bool:
+    """Block until the terminal answers on ``port``, or the timeout passes.
+
+    This exists because the browser used to be opened on a fixed one-second
+    timer. One second is a guess, and on the machine that matters it is the
+    wrong one: a cold start of a 125MB unsigned onedir build has Defender
+    reading every library before uvicorn binds. The browser then landed on a
+    dead port, showed "can't reach this site", and the terminal appeared
+    broken until it was refreshed enough times to coincide with the server
+    coming up.
+
+    Polling for the real thing costs nothing and cannot be wrong. ``/api/state``
+    rather than a bare socket connect, because a bound socket is not a served
+    page -- uvicorn accepts connections a moment before the app is ready, and
+    that gap is exactly the failure being fixed.
+    """
+    import urllib.error
+    import urllib.request
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"http://{host}:{port}/api/state", timeout=2.0
+            ) as response:
+                if response.status == 200:
+                    return True
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+        time.sleep(0.15)
+    return False
+
+
 def find_free_port(host: str, start: int, attempts: int = 20) -> int | None:
     """The first free port at or after ``start``."""
     import socket
@@ -1005,7 +1039,19 @@ def run_server(
         import threading
         import webbrowser
 
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        def _open_when_ready() -> None:
+            if wait_until_serving(host, port):
+                webbrowser.open(url)
+            else:
+                # Never silently give up: the operator is looking at a console
+                # that said it was starting.
+                print(
+                    f"The terminal is taking longer than usual to start. "
+                    f"Open {url} once it does.",
+                    file=sys.stderr,
+                )
+
+        threading.Thread(target=_open_when_ready, daemon=True).start()
 
     logger.info("GODALGO terminal on %s (loopback only)", url)
     try:

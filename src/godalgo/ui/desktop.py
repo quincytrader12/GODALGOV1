@@ -330,16 +330,19 @@ class _ServerThread(threading.Thread):
 
     def wait_until_ready(self, timeout: float) -> bool:
         """Poll until the server answers, so the window never shows a blank
-        page or a connection error on first paint."""
+        page or a connection error on first paint.
+
+        In slices, so a server that has already died is noticed at once rather
+        than waited out for the whole timeout.
+        """
+        from godalgo.ui.server import wait_until_serving
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.error is not None:
                 return False
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.settimeout(0.5)
-                if probe.connect_ex(("127.0.0.1", self._port)) == 0:
-                    return True
-            time.sleep(0.1)
+            if wait_until_serving("127.0.0.1", self._port, timeout=0.5):
+                return True
         return False
 
 

@@ -4,16 +4,20 @@
 Double-clickable entry point, and the script PyInstaller wraps into a single
 executable.
 
-By default on Windows it opens a native window on a port the OS chooses, which
-is the mode that exists because the browser-tab mode kept failing in ways that
-had nothing to do with trading -- a hardcoded port a second launch could not
-bind, an out-of-date copy left serving silently behind the failure, and a tab
-that could be closed while the bot went on holding a position unseen.
+A browser tab is the default, and the browser is opened only once the server
+actually answers -- see wait_until_serving. It used to open on a fixed
+one-second timer, which is a guess, and on a cold start of the packaged build
+it was the wrong one: the tab landed on a port nothing was listening to yet
+and had to be refreshed until the server caught up.
 
-    godalgo-terminal.exe                  # a window
-    godalgo-terminal.exe --browser        # a browser tab on port 8787
+    godalgo-terminal.exe                  # a browser tab on port 8787
+    godalgo-terminal.exe --window         # a native window instead (Windows)
     godalgo-terminal.exe --no-browser     # serve only; what the service uses
     godalgo-terminal.exe --check-window   # is the window component present?
+
+--window is opt-in rather than the default because it is the one mode that
+cannot be verified in CI: a runner has no desktop, so only the presence of the
+window component is checked, never the window opening.
 
 Packaging notes:
 
@@ -53,10 +57,8 @@ def main() -> int:
                "godalgo-terminal service install",
     )
     parser.add_argument(
-        "--port", type=int, default=None,
-        help="serve on a fixed port and use a browser tab; the window mode "
-             "picks a free port itself, so this is only needed for the "
-             "background service or a second copy",
+        "--port", type=int, default=8787,
+        help="port for the browser tab; --window picks a free one itself",
     )
     parser.add_argument("--equity", type=float, default=10_000.0)
     parser.add_argument("--symbol", default="BTC/USDT")
@@ -70,7 +72,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--browser", action="store_true",
-        help="open in a browser tab instead of a window",
+        help="open in a browser tab (the default; kept so existing shortcuts "
+             "and scripts carry on working)",
+    )
+    parser.add_argument(
+        "--window", action="store_true",
+        help="open in a native window instead of a browser tab (Windows)",
     )
     parser.add_argument(
         "--check-window", action="store_true",
@@ -119,28 +126,21 @@ def main() -> int:
             symbol=args.symbol, equity=args.equity, bar_seconds=args.bar_seconds,
         )
 
-    # A window unless something asks otherwise. Every recent failure here was
-    # a browser-tab failure and none of them were trading failures: a fixed
-    # port that a second launch could not bind, an older copy left serving
-    # silently, a tab that could be closed while the bot kept running unseen.
-    # A window has its own port, its own taskbar entry, and closing it stops
-    # the program.
-    from godalgo.ui import desktop
+    if args.window:
+        from godalgo.ui import desktop
 
-    wants_server = args.no_browser or args.browser or args.port is not None
-    if not wants_server and desktop.available():
-        return desktop.run_desktop(bridge)
-
-    if not wants_server:
+        if desktop.available():
+            return desktop.run_desktop(bridge)
         print("no window component in this build; opening a browser tab")
 
-    port = args.port if args.port is not None else 8787
-    print(f"GODALGO terminal -> http://127.0.0.1:{port}")
+    print(f"GODALGO terminal -> http://127.0.0.1:{args.port}")
     print("loopback only; this process holds credentials and has no auth")
+    if not args.no_browser:
+        print("the browser opens as soon as the terminal answers")
     try:
         # Host is fixed, not exposed as a flag. run_server rejects non-loopback
         # binds anyway, but not offering the option is the stronger guarantee.
-        run_server(bridge, port=port, open_browser=not args.no_browser)
+        run_server(bridge, port=args.port, open_browser=not args.no_browser)
     except KeyboardInterrupt:
         print("\nstopped")
     return 0

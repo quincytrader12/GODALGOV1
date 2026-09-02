@@ -248,14 +248,40 @@ def test_an_unrelated_program_on_the_service_port_is_not_attached_to(
 # waiting for the server
 # --------------------------------------------------------------------------
 
-def test_ready_when_the_port_answers():
+def test_ready_when_the_terminal_answers(tmp_path):
     """The window must not paint before the server can serve it."""
+    import uvicorn
+
+    from godalgo.ui.credentials import CredentialStore
+    from godalgo.ui.journal import TradingJournal
+    from godalgo.ui.server import create_app, find_free_port
+
+    bridge = UIBridge(
+        credentials=CredentialStore(directory=tmp_path),
+        journal=TradingJournal(path=tmp_path / "j.jsonl",
+                               summary_path=tmp_path / "s.jsonl"),
+        market_feed_enabled=False,
+    )
+    port = find_free_port("127.0.0.1", 8920)
+    config = uvicorn.Config(create_app(bridge), host="127.0.0.1", port=port,
+                            log_level="error")
+    server = uvicorn.Server(config)
+    threading.Thread(target=server.run, daemon=True).start()
+    try:
+        assert desktop._ServerThread(bridge, port).wait_until_ready(10.0) is True
+    finally:
+        server.should_exit = True
+
+
+def test_a_bare_listening_socket_is_not_ready():
+    """A socket that accepts and serves nothing is what the browser used to
+    be pointed at. Accepting a connection is not being ready."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         port = listener.getsockname()[1]
         thread = desktop._ServerThread(UIBridge(), port)
-        assert thread.wait_until_ready(timeout=5.0) is True
+        assert thread.wait_until_ready(timeout=1.0) is False
 
 
 def test_not_ready_when_nothing_is_listening():
@@ -437,11 +463,13 @@ def test_data_dir_exists_after_the_call(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("argv", "expect_window"),
     [
-        ([], True),                       # a double-click gets a window
-        (["--demo"], True),
-        (["--browser"], False),           # explicit opt-out
+        ([], False),                      # a double-click gets a browser tab
+        (["--demo"], False),
+        (["--browser"], False),           # the default, named explicitly
         (["--no-browser"], False),        # the background service
-        (["--port", "8787"], False),      # a fixed port means a tab
+        (["--port", "8787"], False),
+        (["--window"], True),             # the window is opt-in
+        (["--window", "--demo"], True),
     ],
 )
 def test_launcher_routing(monkeypatch, argv, expect_window):
@@ -466,10 +494,10 @@ def test_launcher_routing(monkeypatch, argv, expect_window):
 
 
 def test_launcher_falls_back_when_there_is_no_window_component(monkeypatch, capsys):
-    """On Linux and macOS there is no bundled window, and that must be said
-    out loud rather than looking like the window failed to open."""
+    """Asking for a window on a build without one gets a tab, and is told so
+    rather than looking like the window failed to open."""
     launcher = _launcher()
-    monkeypatch.setattr(sys, "argv", ["run-terminal.py"])
+    monkeypatch.setattr(sys, "argv", ["run-terminal.py", "--window"])
     monkeypatch.setattr(desktop, "available", lambda: False)
 
     from godalgo.ui import server
