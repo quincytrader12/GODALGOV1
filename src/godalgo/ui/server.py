@@ -430,13 +430,39 @@ def create_app(bridge: UIBridge) -> FastAPI:
         already showing live prices by the time anyone opens it, and so a
         headless run still logs whether the venue is reachable.
         """
+        startup: asyncio.Task | None = None
         if bridge.session is not None and bridge.mode_controller is not None:
             # Dry run is a real session: the full pipeline runs and the broker
-            # discards the orders. Starting it here means the operator sees
-            # what the bot would do against live prices without choosing
-            # anything first.
-            with contextlib.suppress(Exception):
-                await bridge.session.start(bridge.mode_controller.broker)
+            # discards the orders, so the operator sees what the bot would do
+            # against live prices without choosing anything first.
+            #
+            # Started as a task and NOT awaited. Uvicorn serves nothing until
+            # lifespan startup returns, and starting a session seeds history
+            # from the venue -- a synchronous, paginated, retrying network
+            # call. Awaiting it here meant the terminal could not serve its own
+            # page until the exchange had answered, so a slow or rate-limited
+            # venue presented as an application that would not start. The UI
+            # exists to show what the bot is doing; it must be up *before* the
+            # bot is ready, or the moment you most need to see what is
+            # happening is the moment there is nothing on screen.
+            bridge.events.info(
+                "engine", "starting trading session",
+                "seeding history from the venue; the terminal is usable while "
+                "this runs",
+            )
+
+            async def _start_session() -> None:
+                try:
+                    await bridge.session.start(bridge.mode_controller.broker)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                    bridge.events.error(
+                        "engine", "could not start the trading session",
+                        f"{type(exc).__name__}: {exc}"[:300],
+                    )
+
+            startup = asyncio.create_task(_start_session())
 
         task: asyncio.Task | None = None
         if bridge.market_feed_enabled:
@@ -453,6 +479,10 @@ def create_app(bridge: UIBridge) -> FastAPI:
         try:
             yield
         finally:
+            if startup is not None and not startup.done():
+                startup.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await startup
             if bridge.session is not None:
                 with contextlib.suppress(Exception):
                     await bridge.session.stop()
@@ -932,6 +962,10 @@ def port_owner(host: str, port: int, timeout: float = 1.5) -> str:
     return "godalgo" if b'"health"' in body and b'"pnl"' in body else "other"
 
 
+_READY_SLICE = 5.0
+"""How long each readiness poll waits before reporting progress."""
+
+
 def wait_until_serving(host: str, port: int, timeout: float = 90.0) -> bool:
     """Block until the terminal answers on ``port``, or the timeout passes.
 
@@ -1040,16 +1074,27 @@ def run_server(
         import webbrowser
 
         def _open_when_ready() -> None:
-            if wait_until_serving(host, port):
-                webbrowser.open(url)
-            else:
-                # Never silently give up: the operator is looking at a console
-                # that said it was starting.
-                print(
-                    f"The terminal is taking longer than usual to start. "
-                    f"Open {url} once it does.",
-                    file=sys.stderr,
-                )
+            """Wait for the terminal, however long it takes.
+
+            Deliberately without a deadline. A version of this gave up after 90
+            seconds and printed a note, which left the operator with a console
+            message and no terminal -- worse than the bug it replaced, because
+            at least a premature tab could be refreshed into working. If the
+            server never comes up the process is broken and the log says so;
+            there is nothing gained by also refusing to open the page.
+
+            Progress is printed at a widening cadence, always with the URL, so
+            a slow first launch is visibly slow rather than apparently hung.
+            """
+            waited = 0.0
+            while not wait_until_serving(host, port, timeout=_READY_SLICE):
+                waited += _READY_SLICE
+                if waited in (10.0, 30.0) or waited % 60.0 == 0:
+                    print(
+                        f"still starting after {int(waited)}s — a new build is "
+                        f"scanned on first run. Open {url} yourself any time.",
+                    )
+            webbrowser.open(url)
 
         threading.Thread(target=_open_when_ready, daemon=True).start()
 
