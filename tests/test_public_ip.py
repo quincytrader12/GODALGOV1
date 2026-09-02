@@ -187,11 +187,13 @@ def test_the_endpoint_reports_it(tmp_path, monkeypatch):
         )
 
 
-def test_the_ip_error_points_at_the_panel():
-    """-2015 must send the operator somewhere, not just name the problem."""
+def test_the_ip_error_is_still_classed_as_an_address_problem():
+    """The class drives the measurement: only ``ip_not_allowed`` triggers the
+    egress lookup that says which address the venue actually saw.
+
+    What the message says is asserted in tests/test_egress_address.py.
+    """
     from godalgo.ui.venue import _BINANCE_CODES
 
-    kind, explanation = _BINANCE_CODES["-2015"]
+    kind, _ = _BINANCE_CODES["-2015"]
     assert kind == "ip_not_allowed"
-    assert "Connections" in explanation      # where the address is shown
-    assert "dynamic" in explanation          # why a working key stopped working

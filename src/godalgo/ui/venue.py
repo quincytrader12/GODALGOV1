@@ -53,11 +53,14 @@ _BINANCE_CODES: dict[str, tuple[str, str]] = {
     "-2015": (
         "ip_not_allowed",
         (
-            "Binance rejected the key for this IP address. Add the address "
-            "shown in Connections to the key's allow-list, or check the key "
-            "has 'Enable Reading' and Spot trading enabled. A domestic "
-            "connection is usually dynamic, so an address whitelisted "
-            "correctly can stop matching days later."
+            "Binance rejected the key. This one code covers three different "
+            "causes: the address the request came from is not on the key's "
+            "allow-list; the key does not have 'Enable Reading'; or the key "
+            "is a testnet key being used against the live venue (or the "
+            "reverse). Public market data working proves the network is "
+            "fine — no allow-list applies to it — so the fault is in the "
+            "key's own configuration or in which address the signed request "
+            "left from."
         ),
     ),
     "-2014": ("bad_key_format", "The API key format is not valid — re-copy it."),
@@ -377,6 +380,12 @@ class VenueProbe:
             )
         except Exception as exc:  # noqa: BLE001 - classified and reported
             kind, explanation = _classify(exc)
+            seen: str | None = None
+            if kind == "ip_not_allowed":
+                # Only here, and only on failure: an extra request on every
+                # successful key test would be a round trip for nothing.
+                seen = await egress_address(exchange)
+                explanation += _address_verdict(seen)
             self.events.error(
                 "credentials",
                 f"{credential.exchange_id} rejected the key",
@@ -385,6 +394,7 @@ class VenueProbe:
             return ProbeResult(
                 "credentials", False, explanation,
                 (time.monotonic() - started) * 1000, kind,
+                data={"egress_address": seen} if seen else {},
             )
 
         elapsed = (time.monotonic() - started) * 1000
@@ -414,6 +424,64 @@ class VenueProbe:
                 # rendered in a browser and screenshotted.
             },
         )
+
+
+async def egress_address(exchange: Any, timeout: float = 4.0) -> str | None:
+    """The address the venue saw, measured rather than inferred.
+
+    ccxt builds its aiohttp connector with ``family=AF_UNSPEC`` and Happy
+    Eyeballs racing both families with no delay, so on a dual-stack connection
+    a request can leave over IPv6 while a separate lookup reports the machine's
+    IPv4 address. The operator then whitelists an address the venue never saw,
+    the allow-list check keeps failing, and every piece of evidence on screen
+    says the address is correct -- because the address on screen *is* correct,
+    for a connection that is not the one being made.
+
+    Asking through the exchange's own session removes the inference. Whatever
+    comes back travelled the exact path ccxt uses, through the same connector,
+    the same proxy settings and the same family race.
+    """
+    session = getattr(exchange, "session", None)
+    if session is None:
+        return None
+
+    import aiohttp
+
+    for url in ("https://api.ipify.org", "https://icanhazip.com"):
+        try:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as response:
+                if response.status != 200:
+                    continue
+                text = (await response.text())[:64].strip()
+        except Exception:  # noqa: BLE001 - a diagnostic must not raise
+            continue
+        if text:
+            return text
+    return None
+
+
+def _address_verdict(seen: str | None) -> str:
+    """What the measured address means for an allow-list rejection."""
+    if seen is None:
+        return (
+            " The address the request came from could not be measured; read it "
+            "from https://ifconfig.me and compare against the allow-list."
+        )
+    if ":" in seen:
+        return (
+            f" The request reached the venue over IPv6, from {seen}. Your "
+            f"allow-list almost certainly holds an IPv4 address, which the "
+            f"venue never saw. Add this IPv6 address to the key's allow-list, "
+            f"or turn IPv6 off for this connection."
+        )
+    return (
+        f" The request came from {seen}. If that is exactly what the key's "
+        f"allow-list holds, the address is not the problem — check 'Enable "
+        f"Reading' and Spot permissions on the key, and whether it is a "
+        f"testnet key."
+    )
 
 
 async def _close(exchange: Any) -> None:
