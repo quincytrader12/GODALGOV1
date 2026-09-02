@@ -1253,6 +1253,41 @@ function renderCheck(key) {
   return `<div class="conn-check ${cls}">${escapeHtml(result.text)}</div>`;
 }
 
+/* The address the venue sees. A -2015 sends you looking for exactly this
+ * number, and it was a browser errand until now. Fetched separately from the
+ * connections payload because it is a network round trip to a third party and
+ * must not be able to hold up the key list. */
+async function loadPublicIp(refresh = false) {
+  const value = $('k-ip-value');
+  const button = $('k-ip-recheck');
+  if (!value) return;
+
+  value.textContent = refresh ? 'rechecking…' : 'checking…';
+  value.className = 'v pending';
+  if (button) button.disabled = true;
+
+  try {
+    const r = await fetch('/api/ip' + (refresh ? '?refresh=true' : ''));
+    const data = await r.json();
+    if (data.ip) {
+      value.textContent = data.ip;
+      value.className = 'v';
+      value.title = 'from ' + (data.source || 'lookup') + ' — click to select';
+    } else {
+      value.textContent = 'could not determine';
+      value.className = 'v failed';
+      value.title = data.error || '';
+    }
+  } catch (err) {
+    // A readout that throws must not take the panel with it.
+    value.textContent = 'could not determine';
+    value.className = 'v failed';
+    value.title = String(err);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function loadConnections() {
   const r = await fetch('/api/connections');
   const data = await r.json();
@@ -1649,6 +1684,9 @@ resizeEcg();
 requestAnimationFrame(frame);
 connect();
 loadConnections();
+loadPublicIp();
+
+$('k-ip-recheck')?.addEventListener('click', () => loadPublicIp(true));
 loadJournal();
 setInterval(loadJournal, 15000);
 

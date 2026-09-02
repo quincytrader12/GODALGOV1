@@ -747,3 +747,31 @@ html, body {
   margin-left: 6px;
   vertical-align: middle;
 }
+
+/* ---------- public address ----------
+   Sits above the key list because it is the thing a -2015 sends you looking
+   for, and hunting for it in a browser is the errand this replaces. */
+
+.ipbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+.ipbar .k { color: var(--text-dim); font-size: 10px; letter-spacing: .08em; }
+.ipbar .v {
+  flex: 1 1 auto;
+  min-width: 0;                 /* or a long value pushes the button out */
+  color: var(--cyan);
+  font-size: 12px;
+  /* Selectable on purpose: this value exists to be copied into Binance. */
+  user-select: all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ipbar .v.pending { color: var(--text-dim); }
+.ipbar .v.failed  { color: var(--red); user-select: auto; }
+.ipbar button { flex: 0 0 auto; }

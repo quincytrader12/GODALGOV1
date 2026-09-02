@@ -159,6 +159,14 @@
       <div class="panel-title"><span>Connections</span><span class="spacer"></span>
         <span class="meta" id="k-count">0</span></div>
       <div class="scroll">
+        <div class="ipbar" id="k-ip" title="the address the venue sees">
+          <span class="k">THIS MACHINE</span>
+          <span class="v" id="k-ip-value">checking…</span>
+          <button class="ghost tiny" id="k-ip-recheck">recheck</button>
+        </div>
+        <p class="note" id="k-ip-note">Must be on the key&rsquo;s allow-list or
+           every call returns <code>-2015</code>. Home addresses change without
+           warning — recheck if a working key stops.</p>
         <div class="conn-list" id="k-list"></div>
         <div class="form">
           <button class="ghost wide" id="k-check">Test venue connection</button>

@@ -689,6 +689,29 @@ def create_app(bridge: UIBridge) -> FastAPI:
             "rows": len(bridge.watchlist),
         })
 
+    @app.get("/api/ip")
+    async def public_address(refresh: bool = False) -> JSONResponse:
+        """This machine's public IPv4 address, for the venue's allow-list.
+
+        Binance's -2015 says the key was used from an address that is not on
+        its allow-list, but not what the address currently *is* -- and on a
+        domestic connection that changes without warning, so a key whitelisted
+        correctly stops working days later. Showing it beside the key turns a
+        browser errand into something on screen.
+        """
+        from godalgo.ui.network import public_ip
+
+        # Off the event loop: this is a network round trip, and the snapshot
+        # websocket shares this loop.
+        found = await asyncio.to_thread(public_ip, force=refresh)
+        if refresh and found.ip:
+            bridge.events.info(
+                "network", f"public address {found.ip}",
+                "this is the address the venue sees; it must be on the key's "
+                "allow-list",
+            )
+        return JSONResponse(found.to_dict())
+
     @app.post("/api/diagnostics")
     async def diagnostics(payload: dict[str, Any] | None = None) -> JSONResponse:
         """Find out which layer is failing, and say so in plain terms.

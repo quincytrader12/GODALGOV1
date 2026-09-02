@@ -53,9 +53,11 @@ _BINANCE_CODES: dict[str, tuple[str, str]] = {
     "-2015": (
         "ip_not_allowed",
         (
-            "Binance rejected the key for this IP address. Add your current "
-            "public IP to the key's allow-list, or check the key has "
-            "'Enable Reading'."
+            "Binance rejected the key for this IP address. Add the address "
+            "shown in Connections to the key's allow-list, or check the key "
+            "has 'Enable Reading' and Spot trading enabled. A domestic "
+            "connection is usually dynamic, so an address whitelisted "
+            "correctly can stop matching days later."
         ),
     ),
     "-2014": ("bad_key_format", "The API key format is not valid — re-copy it."),
