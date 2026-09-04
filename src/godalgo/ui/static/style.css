@@ -801,3 +801,20 @@ html, body {
   border-top: 1px solid var(--line);
   opacity: .8;
 }
+
+/* The scanner's verdict, beside the price. Replaces the spread column, which
+   was the least useful number on the row: the spread already reaches the
+   operator through the scan's own rejection reason when it matters, and
+   "why is this symbol not being traded" had no answer on screen at all. */
+.wl-row .vd {
+  font-size: 9px;
+  letter-spacing: .04em;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wl-row .vd.trading  { color: var(--green); }
+.wl-row .vd.selected { color: var(--cyan); }
+.wl-row .vd.rejected { color: var(--text-dim); }
+.wl-row .vd.pending  { color: var(--text-dim); opacity: .6; }

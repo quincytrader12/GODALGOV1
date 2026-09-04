@@ -405,3 +405,148 @@ def test_a_stopped_session_reports_stopped(session):
     assert session.running is False
     asyncio.run(session.stop())
     assert session.running is False
+
+
+# --------------------------------------------------------------------------
+# the scan is visible, including what it refused
+# --------------------------------------------------------------------------
+
+def test_every_scanned_symbol_gets_a_verdict(session, bridge):
+    """A scan that refuses most of what it sees is the scanner working. Saying
+    nothing about the refusals is what made an empty book indistinguishable
+    from a scanner that never ran."""
+    async def _go():
+        await session.start(_DryRunBroker())
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if bridge.scan:
+                break
+        await session.stop()
+
+    asyncio.run(_go())
+    assert set(bridge.scan) == set(bridge.universe)
+    for symbol, verdict in bridge.scan.items():
+        assert verdict["state"] in ("trading", "selected", "rejected"), symbol
+        assert verdict["reason"], f"{symbol} has a verdict with no reason"
+
+
+def test_a_refusal_carries_the_reason_the_scanner_gave(session, bridge):
+    async def _go():
+        await session.start(_DryRunBroker())
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if bridge.scan:
+                break
+        await session.stop()
+
+    asyncio.run(_go())
+    # AAPL is the random walk: no autocorrelation of either sign.
+    assert bridge.scan["AAPL"]["state"] == "rejected"
+    assert bridge.scan["AAPL"]["reason"] == "no regime"
+
+
+def test_a_symbol_held_out_by_the_concurrency_limit_is_not_called_rejected(session):
+    """It passed every filter. Reporting it as refused would blame the
+    instrument for a portfolio limit."""
+    from godalgo.data.scanner import Candidate, ScanResult
+    from godalgo.core.types import Regime
+
+    def _candidate(symbol, rejected=None):
+        return Candidate(
+            symbol=symbol, score=0.5, regime=Regime.TRENDING, confidence=0.4,
+            annual_vol=0.3, spread_bps=2.0, volume_24h=1e9, headroom=2.0,
+            hurst=0.6, half_life=40.0, rejected=rejected,
+        )
+
+    session.supervisor = type("S", (), {"state": type("T", (), {
+        "last_scan": ScanResult(
+            timestamp=None,
+            selected=(_candidate("A"), _candidate("B")),
+            rejected=(_candidate("C", "no regime"),),
+            scanned=3,
+        ),
+    })()})()
+
+    verdicts = session._verdicts({"A": object()})
+    assert verdicts["A"]["state"] == "trading"
+    assert verdicts["B"]["state"] == "selected"
+    assert "concurrency limit" in verdicts["B"]["reason"]
+    assert verdicts["C"]["state"] == "rejected"
+
+
+def test_no_scan_yet_produces_no_verdicts_rather_than_false_ones(session):
+    """'Not scanned yet' must not render as 'refused'."""
+    session.supervisor = type("S", (), {
+        "state": type("T", (), {"last_scan": None})(),
+    })()
+    assert session._verdicts({}) == {}
+
+
+def test_the_verdict_carries_what_the_scanner_measured(session, bridge):
+    """So a refusal can be argued with rather than merely accepted."""
+    async def _go():
+        await session.start(_DryRunBroker())
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if bridge.scan:
+                break
+        await session.stop()
+
+    asyncio.run(_go())
+    verdict = next(iter(bridge.scan.values()))
+    for key in ("regime", "score", "confidence", "headroom"):
+        assert key in verdict
+
+
+def test_the_watchlist_sorts_by_verdict_not_only_turnover(tmp_path):
+    """Burying a READY behind two refusals makes the panel read as unsorted."""
+    from godalgo.ui.state import WatchedSymbol
+
+    bridge = UIBridge(
+        credentials=CredentialStore(directory=tmp_path),
+        journal=TradingJournal(path=tmp_path / "j.jsonl",
+                               summary_path=tmp_path / "s.jsonl"),
+        market_feed_enabled=False,
+    )
+    for symbol in ("AAA", "BBB", "CCC"):
+        bridge.watchlist[symbol] = WatchedSymbol(symbol=symbol, price=100.0,
+                                                 quote_volume=1e9)
+    bridge.scan = {
+        "AAA": {"state": "rejected"},
+        "BBB": {"state": "selected"},
+        "CCC": {"state": "trading"},
+    }
+    assert [w.symbol for w in bridge.watchlist_rows()] == ["CCC", "BBB", "AAA"]
+
+
+def test_an_unscanned_symbol_sorts_above_a_refused_one(tmp_path):
+    """Not yet judged is a better prospect than judged and refused."""
+    from godalgo.ui.state import WatchedSymbol
+
+    bridge = UIBridge(
+        credentials=CredentialStore(directory=tmp_path),
+        journal=TradingJournal(path=tmp_path / "j.jsonl",
+                               summary_path=tmp_path / "s.jsonl"),
+        market_feed_enabled=False,
+    )
+    for symbol in ("AAA", "BBB"):
+        bridge.watchlist[symbol] = WatchedSymbol(symbol=symbol, price=100.0,
+                                                 quote_volume=1e9)
+    bridge.scan = {"AAA": {"state": "rejected"}}
+    assert [w.symbol for w in bridge.watchlist_rows()] == ["BBB", "AAA"]
+
+
+def test_the_scan_reaches_the_snapshot(session, bridge):
+    async def _go():
+        await session.start(_DryRunBroker())
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if bridge.scan:
+                break
+        await session.stop()
+
+    asyncio.run(_go())
+    body = bridge.snapshot().to_dict()
+    assert body["scan"], "the verdicts must reach the front end"
+    assert body["portfolio"]["scanned"] == len(bridge.universe)
+    assert body["portfolio"]["rejected"], "refusals must travel too"

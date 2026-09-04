@@ -112,6 +112,14 @@ class SupervisorState:
             "selected": (
                 [c.to_dict() for c in self.last_scan.selected] if self.last_scan else []
             ),
+            # Rejections carried alongside selections, because "nothing was
+            # selected" and "nine things were examined and each refused for a
+            # named reason" look identical from a list of winners and are
+            # completely different facts. The second is the scanner working.
+            "rejected": (
+                [c.to_dict() for c in self.last_scan.rejected] if self.last_scan else []
+            ),
+            "scanned": self.last_scan.scanned if self.last_scan else 0,
         }
 
 

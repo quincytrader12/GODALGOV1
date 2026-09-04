@@ -450,6 +450,9 @@ class UISnapshot:
     """Most recent activity. Carried in the snapshot rather than polled
     separately so the log cannot drift out of step with what it describes."""
 
+    scan: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """The scanner's verdict per symbol. Small: a handful of numbers each."""
+
     portfolio: dict[str, Any] | None = None
     """Which symbols the bot is trading, and what the last scan chose."""
 
@@ -487,6 +490,7 @@ class UISnapshot:
             },
             "book": _book_headline(self.book),
             "portfolio": self.portfolio,
+            "scan": self.scan,
             "brain": {
                 "mode": self.mode,
                 "symbol": self.symbol,

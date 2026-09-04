@@ -963,6 +963,7 @@ canvas.addEventListener('click', (event) => {
  */
 
 const wlRows = new Map();
+let scanVerdicts = {};
 
 function buildWatchRow(symbol) {
   const row = document.createElement('div');
@@ -971,14 +972,14 @@ function buildWatchRow(symbol) {
     <span class="sym"><b></b></span>
     <span class="px"></span>
     <span class="ch"></span>
-    <span class="sp"></span>`;
+    <span class="vd"></span>`;
   const cells = {
     root: row,
     sym: row.querySelector('.sym'),
     name: row.querySelector('.sym b'),
     px: row.querySelector('.px'),
     ch: row.querySelector('.ch'),
-    sp: row.querySelector('.sp'),
+    vd: row.querySelector('.vd'),
     last: {},
   };
   cells.name.textContent = symbol;
@@ -1028,11 +1029,10 @@ function renderWatchlist(rows, venue) {
       maximumFractionDigits: w.price < 1 ? 5 : 2,
     }) : '—';
     const change = (w.change_pct * 100).toFixed(2) + '%';
-    const spread = w.spread_bps ? w.spread_bps.toFixed(1) : '—';
 
     setText(cells.px, price);
     setText(cells.ch, change);
-    setText(cells.sp, spread);
+    renderVerdict(cells, (scanVerdicts || {})[w.symbol], w);
 
     if (cells.last.change !== w.change_pct) {
       cells.ch.className = 'ch ' + (w.change_pct > 0 ? 'up' : w.change_pct < 0 ? 'down' : '');
@@ -1062,6 +1062,72 @@ function renderWatchlist(rows, venue) {
   }
 }
 
+/* One word per row saying what the scanner decided, and the whole reason in
+ * the tooltip. "Why is this symbol not being traded" previously had no answer
+ * anywhere on screen -- the scan ran, refused most of what it saw, and said
+ * nothing about it. */
+const VERDICT_LABEL = {
+  trading: 'TRADING',
+  selected: 'READY',
+  rejected: 'NO',
+};
+
+function renderVerdict(cells, verdict, row) {
+  if (!verdict) {
+    // No scan yet is not the same as refused, and must not read as one.
+    setText(cells.vd, '·');
+    if (cells.last.verdict !== 'pending') {
+      cells.vd.className = 'vd pending';
+      cells.vd.title = 'not scanned yet — the first scan runs when a session '
+        + 'starts, and needs price history to rank on';
+      cells.last.verdict = 'pending';
+    }
+    return;
+  }
+
+  setText(cells.vd, VERDICT_LABEL[verdict.state] || verdict.state);
+  const key = verdict.state + '|' + verdict.reason;
+  if (cells.last.verdict === key) return;
+  cells.last.verdict = key;
+  cells.vd.className = 'vd ' + verdict.state;
+
+  // Everything the scanner measured, so a refusal can be argued with rather
+  // than merely accepted.
+  const bits = [verdict.reason];
+  if (verdict.regime) bits.push(`regime ${verdict.regime}`);
+  if (verdict.confidence) bits.push(`confidence ${verdict.confidence}`);
+  if (verdict.headroom) bits.push(`edge ${verdict.headroom}x the cost gate`);
+  if (verdict.half_life) bits.push(`half-life ${verdict.half_life} bars`);
+  if (row && row.spread_bps) bits.push(`spread ${row.spread_bps.toFixed(1)}bps`);
+  cells.vd.title = bits.join(' · ');
+}
+
+/* The one line that says the scan happened at all: how many were examined,
+ * how many survived, how many are running. Without it an empty book is
+ * indistinguishable from a scanner that never ran. */
+function renderScanSummary(snap) {
+  const el = $('d-scan');
+  if (!el) return;
+  const p = snap.portfolio;
+  if (!p || !p.last_scan_at) {
+    el.textContent = p ? 'scanning…' : '';
+    el.title = 'the first scan has not finished yet';
+    return;
+  }
+  const scanned = p.scanned || 0;
+  const selected = (p.selected || []).length;
+  const trading = (p.active || []).length;
+  // A funnel, not a sentence. The words wrapped the title bar onto two lines
+  // and pushed the row count out of it; the whole reading is in the tooltip.
+  el.textContent = `${scanned}→${selected}→${trading}`;
+  el.title = `${scanned} scanned, ${selected} passed the filters, `
+    + `${trading} being traded. `
+    + (selected === 0
+      ? 'Every symbol was refused — that is the expected outcome of a scan, '
+        + 'not a fault. Hover a row for the reason.'
+      : 'Hover a row for the reason it was passed or refused.');
+}
+
 function showWatchlist(show) {
   $('w-body').hidden = !show;
   $('d-body').hidden = show;
@@ -1076,7 +1142,11 @@ $('d-back').addEventListener('click', () => {
 
 function renderDetail(d) {
   const body = $('d-body');
-  $('d-id').textContent = d ? d.id : `${wlRows.size} watched`;
+  // Shown for a selected position only. In watchlist mode the scan funnel
+  // beside it already carries the count, and both wrapped the title bar.
+  $('d-id').hidden = !d;
+  $('d-id').textContent = d ? d.id : '';
+  $('d-scan').hidden = !!d;
   // Nothing selected: the panel shows the watchlist, which is always saying
   // something, rather than an empty box that never is.
   if (!d) { showWatchlist(true); return; }
@@ -1620,6 +1690,7 @@ function renderPortfolio(snap) {
  * count is the number that looks like diversification. */
 function renderBook(snap) {
   renderPortfolio(snap);
+  renderScanSummary(snap);
   const book = snap.book;
   const breadth = $('k-breadth');
   if (!book || book.state !== 'ready') {
@@ -1733,6 +1804,7 @@ function apply(snap) {
   renderLamps(snap);
   renderBook(snap);
   renderBuild(snap);
+  scanVerdicts = snap.scan || {};
   renderWatchlist(snap.watchlist, snap.venue);
 
   state.equityHistory.push(snap.pnl.equity);

@@ -425,6 +425,46 @@ class PortfolioSession:
 
         self._apply_book(engines)
         self.bridge.portfolio = supervisor.state.snapshot()
+        self.bridge.scan = self._verdicts(engines)
+
+    def _verdicts(self, engines: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """What the scanner decided about every symbol it looked at.
+
+        Keyed by symbol so the watchlist can show the verdict beside the price
+        without the front end having to join two lists. Four states, and the
+        distinction between the middle two is the one that matters: a symbol
+        can pass every filter and still not be traded, because only so many
+        are traded at once. Reporting that as a rejection would blame the
+        instrument for a portfolio limit.
+        """
+        scan = self.supervisor.state.last_scan if self.supervisor else None
+        out: dict[str, dict[str, Any]] = {}
+        if scan is None:
+            return out
+
+        for candidate in list(scan.selected) + list(scan.rejected):
+            symbol = candidate.symbol
+            if symbol in engines:
+                state, reason = "trading", "admitted and running"
+            elif candidate.rejected:
+                state, reason = "rejected", candidate.rejected
+            else:
+                state, reason = "selected", (
+                    "passed the scan but not admitted — the concurrency limit "
+                    "is full, not a fault of this symbol"
+                )
+            out[symbol] = {
+                "state": state,
+                "reason": reason,
+                "regime": getattr(candidate.regime, "value", str(candidate.regime)),
+                "score": round(candidate.score, 3),
+                "confidence": round(candidate.confidence, 3),
+                "headroom": round(candidate.headroom, 2),
+                "half_life": (
+                    round(candidate.half_life, 1) if candidate.half_life else None
+                ),
+            }
+        return out
 
     def _apply_book(self, engines: dict[str, Any]) -> None:
         """Cap each engine at what the allocator permits. Only ever reduces."""

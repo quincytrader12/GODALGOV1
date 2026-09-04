@@ -176,6 +176,13 @@ class UIBridge:
     mode switch mean anything at all.
     """
 
+    scan: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """The scanner's verdict per symbol, for the watchlist.
+
+    Keyed by symbol rather than kept as two lists so the panel can show the
+    verdict beside the price without joining anything.
+    """
+
     portfolio: dict[str, Any] | None = None
     """Supervisor state: which symbols are active, and the last scan.
 
@@ -271,9 +278,17 @@ class UIBridge:
         """Ordered for reading: what the bot is in, then what it is on, then
         by turnover. Sorting by price or by symbol would bury the row that
         matters under whatever happens to be alphabetically first."""
+        # Verdict outranks turnover. A symbol the scanner refused is the least
+        # interesting row on the panel however heavily it trades, and burying
+        # a READY behind two NOs makes the list read as unsorted.
+        rank = {"trading": 0, "selected": 1, "rejected": 3}
         return sorted(
             self.watchlist.values(),
-            key=lambda w: (not w.held, not w.active, -w.quote_volume, w.symbol),
+            key=lambda w: (
+                not w.held, not w.active,
+                rank.get((self.scan.get(w.symbol) or {}).get("state"), 2),
+                -w.quote_volume, w.symbol,
+            ),
         )
 
     def record_probe(self, results: list[ProbeResult]) -> None:
@@ -341,6 +356,7 @@ class UIBridge:
             current_weight=self.current_weight,
             book=self.book.to_dict() if self.book is not None else None,
             portfolio=self.portfolio,
+            scan=self.scan,
             last_price=self.last_price,
             watchlist=self.watchlist_rows(),
             has_keys=len(self.credentials) > 0,
