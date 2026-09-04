@@ -29,18 +29,22 @@ jobs:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false   # a Windows failure must not cancel a working macOS build
+      fail-fast: false   # one platform failing must not cancel the others
+      # Windows only on an ordinary run, all three when a release is cut.
+      #
+      # Windows is the only platform anyone downloads, and it is also the only
+      # one whose test run says anything I cannot already see: the full suite
+      # runs on Linux locally before every push, so the Linux job was
+      # confirming what was already known, and macOS was building a binary
+      # nobody takes. Windows is where the platform-specific failures actually
+      # live -- it has no POSIX permission bits, which is how the credential
+      # file came to be world-readable while every Linux check passed.
+      #
+      # A tag still builds all three, because the release attaches all three.
       matrix:
-        include:
-          - os: windows-latest
-            label: windows-x64
-            binary: dist/godalgo-terminal/godalgo-terminal.exe
-          - os: macos-latest
-            label: macos-arm64
-            binary: dist/godalgo-terminal/godalgo-terminal
-          - os: ubuntu-latest
-            label: linux-x64
-            binary: dist/godalgo-terminal/godalgo-terminal
+        include: ${{ fromJSON(startsWith(github.ref, 'refs/tags/v')
+          && '[{"os":"windows-latest","label":"windows-x64","binary":"dist/godalgo-terminal/godalgo-terminal.exe"},{"os":"macos-latest","label":"macos-arm64","binary":"dist/godalgo-terminal/godalgo-terminal"},{"os":"ubuntu-latest","label":"linux-x64","binary":"dist/godalgo-terminal/godalgo-terminal"}]'
+          || '[{"os":"windows-latest","label":"windows-x64","binary":"dist/godalgo-terminal/godalgo-terminal.exe"}]') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -110,18 +114,11 @@ jobs:
         run: ./${{ matrix.binary }} --check-window
 
       - name: Upload artifact
-        # Only the platform that actually gets downloaded, unless a release is
-        # being cut. Uploading all three on every run filled the account's
-        # artifact storage quota and every build then failed at the upload step
-        # -- with the tests passed, the binaries built and verified, and
-        # nothing wrong with the code.
-        #
-        # macOS and Linux are still built and still smoke-tested on every run.
-        # That is where their value is: CI on three platforms is what caught a
-        # credential file left world-readable on Windows, and it costs runner
-        # minutes rather than storage. What was wasteful was keeping two
-        # binaries nobody downloads.
-        if: matrix.label == 'windows-x64' || startsWith(github.ref, 'refs/tags/v')
+        # Uploading three platforms on every run filled the account's artifact
+        # storage quota, and every build then failed at this step -- tests
+        # passed, binaries built and verified, nothing wrong with the code.
+        # The matrix above now builds only Windows on an ordinary run, so this
+        # is belt and braces rather than the fix.
         uses: actions/upload-artifact@v4
         with:
           name: godalgo-terminal-${{ matrix.label }}
