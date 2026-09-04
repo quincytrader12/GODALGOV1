@@ -110,6 +110,18 @@ jobs:
         run: ./${{ matrix.binary }} --check-window
 
       - name: Upload artifact
+        # Only the platform that actually gets downloaded, unless a release is
+        # being cut. Uploading all three on every run filled the account's
+        # artifact storage quota and every build then failed at the upload step
+        # -- with the tests passed, the binaries built and verified, and
+        # nothing wrong with the code.
+        #
+        # macOS and Linux are still built and still smoke-tested on every run.
+        # That is where their value is: CI on three platforms is what caught a
+        # credential file left world-readable on Windows, and it costs runner
+        # minutes rather than storage. What was wasteful was keeping two
+        # binaries nobody downloads.
+        if: matrix.label == 'windows-x64' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: godalgo-terminal-${{ matrix.label }}
@@ -118,7 +130,9 @@ jobs:
           # a single file.
           path: dist/godalgo-terminal/
           if-no-files-found: error
-          retention-days: 30
+          # Five days, not thirty. These are downloaded within minutes of being
+          # built; a month of retention is a month of a dead 125MB per run.
+          retention-days: 5
 
   release:
     name: publish release
